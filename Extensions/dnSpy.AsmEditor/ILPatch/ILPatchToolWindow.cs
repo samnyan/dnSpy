@@ -21,6 +21,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel.Composition;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Windows;
@@ -28,12 +29,14 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
+using dnSpy.Contracts.App;
 using dnSpy.Contracts.Controls;
 using dnSpy.Contracts.Extension;
 using dnSpy.Contracts.Menus;
 using dnSpy.Contracts.MVVM;
 using dnSpy.Contracts.ToolWindows;
 using dnSpy.Contracts.ToolWindows.App;
+using Microsoft.Win32;
 
 namespace dnSpy.AsmEditor.ILPatch {
 	[ExportAutoLoaded]
@@ -87,6 +90,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly ObservableCollection<HistoryRow> history = new ObservableCollection<HistoryRow>();
 		readonly TextBlock summaryText;
 		readonly TextBox diffText;
+		readonly Button exportButton;
 
 		public DataGrid ChangesGrid { get; }
 
@@ -97,9 +101,20 @@ namespace dnSpy.AsmEditor.ILPatch {
 			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 			root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-			summaryText = new TextBlock { Margin = new Thickness(0, 0, 0, 6) };
-			Grid.SetRow(summaryText, 0);
-			root.Children.Add(summaryText);
+			var header = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 6) };
+			exportButton = new Button {
+				Content = "Export .ilpatch...",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+			};
+			exportButton.Click += ExportButton_Click;
+			DockPanel.SetDock(exportButton, Dock.Right);
+			header.Children.Add(exportButton);
+
+			summaryText = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
+			header.Children.Add(summaryText);
+			Grid.SetRow(header, 0);
+			root.Children.Add(header);
 
 			var reviewGrid = new Grid();
 			reviewGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -206,6 +221,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			summaryText.Text = effectiveChanges.Count == 0
 				? "No effective CIL method changes are currently tracked."
 				: $"{effectiveChanges.Count} method change(s) currently differ from their original baseline.";
+			exportButton.IsEnabled = effectiveChanges.Count != 0;
 
 			ChangeRow? selectedRow = null;
 			if (selectedTarget is not null)
@@ -213,6 +229,30 @@ namespace dnSpy.AsmEditor.ILPatch {
 			selectedRow ??= changes.FirstOrDefault();
 			ChangesGrid.SelectedItem = selectedRow;
 			UpdateDiff(selectedRow);
+		}
+
+		void ExportButton_Click(object sender, RoutedEventArgs e) {
+			if (ILPatchWorkspace.Instance.GetEffectiveChanges().Count == 0)
+				return;
+
+			var dialog = new SaveFileDialog {
+				Title = "Export IL Patch",
+				Filter = "IL Patch (*.ilpatch)|*.ilpatch|JSON (*.json)|*.json|All files (*.*)|*.*",
+				DefaultExt = ".ilpatch",
+				AddExtension = true,
+				OverwritePrompt = true,
+				FileName = "patch.ilpatch",
+			};
+			if (dialog.ShowDialog(Window.GetWindow(this)) != true)
+				return;
+
+			try {
+				string name = Path.GetFileNameWithoutExtension(dialog.FileName);
+				ILPatchSerializer.Save(dialog.FileName, ILPatchWorkspace.Instance.CreateDocument(name));
+			}
+			catch (Exception ex) {
+				MsgBox.Instance.Show(ex);
+			}
 		}
 
 		void ChangesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateDiff(ChangesGrid.SelectedItem as ChangeRow);

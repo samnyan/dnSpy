@@ -64,7 +64,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (method.Body is null || trackedMethods.ContainsKey(method))
 				return;
 
-			var baseline = CilNormalizer.CreateSnapshot(method);
+			var baseline = CreateWorkspaceSnapshot(method);
 			trackedMethods.Add(method, new TrackedMethod(method, baseline));
 		}
 
@@ -78,7 +78,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				if (tracked.Method.Body is null)
 					continue;
 
-				var current = CilNormalizer.CreateSnapshot(tracked.Method);
+				var current = CreateWorkspaceSnapshot(tracked.Method);
 				if (StringComparer.Ordinal.Equals(tracked.Current.CanonicalHash, current.CanonicalHash))
 					continue;
 
@@ -108,7 +108,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return;
 
 			EnsureTracked(method);
-			pendingMutations[method] = CilNormalizer.CreateSnapshot(method);
+			pendingMutations[method] = CreateWorkspaceSnapshot(method);
 		}
 
 		/// <summary>
@@ -125,7 +125,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (method.Body is null)
 				return;
 
-			var after = CilNormalizer.CreateSnapshot(method);
+			var after = CreateWorkspaceSnapshot(method);
 			if (!trackedMethods.TryGetValue(method, out var tracked))
 				return;
 			tracked.Current = after;
@@ -165,6 +165,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var document = new ILPatchDocument { Name = name ?? string.Empty };
 			document.Methods.AddRange(GetEffectiveChanges());
 			return document;
+		}
+
+		static ILPatchMethodBodySnapshot CreateWorkspaceSnapshot(MethodDef method) {
+			var snapshot = CilNormalizer.CreateSnapshot(method);
+			// CilNormalizer still creates a raw canonical hash for debugging. The portable patch
+			// hash intentionally ignores method identity and MaxStack to reduce rebuild noise.
+			snapshot.CanonicalHash = ILPatchBodyHasher.Compute(snapshot);
+			return snapshot;
 		}
 
 		public void Clear() {
