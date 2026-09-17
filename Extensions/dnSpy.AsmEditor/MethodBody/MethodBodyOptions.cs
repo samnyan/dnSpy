@@ -22,6 +22,7 @@ using System.Diagnostics;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
 using dnlib.IO;
+using dnSpy.AsmEditor.ILPatch;
 using dnSpy.Contracts.Decompiler;
 
 namespace dnSpy.AsmEditor.MethodBody {
@@ -53,6 +54,11 @@ namespace dnSpy.AsmEditor.MethodBody {
 		}
 
 		public MethodDef CopyTo(MethodDef method) {
+			// The IL editor and "replace body with stub" both flow through this method. Capture
+			// the current CIL body before it is replaced; the undo-service listener refreshes the
+			// workspace after Execute/Undo/Redo completes.
+			ILPatchWorkspace.Instance.EnsureTracked(method);
+
 			method.CodeType = CodeType;
 			if (BodyType == MethodBodyType.Cil)
 				method.MethodBody = CilBodyOptions.Create();

@@ -29,6 +29,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 	/// without making the exported patch depend on transient intermediate edits.
 	/// </summary>
 	sealed class ILPatchWorkspace {
+		public static ILPatchWorkspace Instance { get; } = new ILPatchWorkspace();
+
 		sealed class TrackedMethod {
 			public MethodDef Method { get; }
 			public ILPatchMethodBodySnapshot Baseline { get; }
@@ -45,13 +47,59 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly Dictionary<MethodDef, ILPatchMethodBodySnapshot> pendingMutations = new Dictionary<MethodDef, ILPatchMethodBodySnapshot>();
 		readonly List<ILPatchEditRecord> history = new List<ILPatchEditRecord>();
 
+		ILPatchWorkspace() {
+		}
+
 		public event EventHandler? Changed;
 
 		public IReadOnlyList<ILPatchEditRecord> History => history;
 
 		/// <summary>
-		/// Must be called before an undoable operation mutates a method. The first snapshot
-		/// becomes the stable baseline for the lifetime of this workspace.
+		/// Captures a method's original CIL body the first time an editing path is about to
+		/// mutate it. Calling this more than once is intentionally harmless.
+		/// </summary>
+		public void EnsureTracked(MethodDef method) {
+			if (method is null)
+				throw new ArgumentNullException(nameof(method));
+			if (method.Body is null || trackedMethods.ContainsKey(method))
+				return;
+
+			var baseline = CilNormalizer.CreateSnapshot(method);
+			trackedMethods.Add(method, new TrackedMethod(method, baseline));
+		}
+
+		/// <summary>
+		/// Refreshes only methods that have already been observed by an editing path. This is
+		/// cheap enough to run after undo/redo events and avoids rescanning every loaded module.
+		/// </summary>
+		public void RefreshTrackedMethods(string description) {
+			bool changed = false;
+			foreach (var tracked in trackedMethods.Values.ToArray()) {
+				if (tracked.Method.Body is null)
+					continue;
+
+				var current = CilNormalizer.CreateSnapshot(tracked.Method);
+				if (StringComparer.Ordinal.Equals(tracked.Current.CanonicalHash, current.CanonicalHash))
+					continue;
+
+				history.Add(new ILPatchEditRecord {
+					TimestampUtc = DateTime.UtcNow,
+					Description = description ?? string.Empty,
+					Method = current.Method,
+					BeforeHash = tracked.Current.CanonicalHash,
+					AfterHash = current.CanonicalHash,
+				});
+				tracked.Current = current;
+				changed = true;
+			}
+
+			if (changed)
+				Changed?.Invoke(this, EventArgs.Empty);
+		}
+
+		/// <summary>
+		/// Explicit mutation API retained for patch application and other operations that want
+		/// to track a single mutation directly instead of relying on the undo-service listener.
 		/// </summary>
 		public void BeginMutation(MethodDef method) {
 			if (method is null)
@@ -59,16 +107,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (method.Body is null)
 				return;
 
-			var before = CilNormalizer.CreateSnapshot(method);
-			if (!trackedMethods.ContainsKey(method))
-				trackedMethods.Add(method, new TrackedMethod(method, before));
-			pendingMutations[method] = before;
+			EnsureTracked(method);
+			pendingMutations[method] = CilNormalizer.CreateSnapshot(method);
 		}
 
 		/// <summary>
-		/// Completes a mutation begun by <see cref="BeginMutation"/>. This method is suitable
-		/// for normal execute, undo and redo paths: the effective change is always recomputed
-		/// as baseline -> current.
+		/// Completes a mutation begun by <see cref="BeginMutation"/>. The effective change is
+		/// always recomputed as baseline -> current.
 		/// </summary>
 		public void EndMutation(MethodDef method, string description) {
 			if (method is null)
