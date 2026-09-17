@@ -150,6 +150,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					continue;
 				result.Add(new ILPatchMethodChange {
 					Target = tracked.Baseline.Method,
+					BaseModuleMvid = tracked.Method.Module?.Mvid ?? Guid.Empty,
 					BaseBody = tracked.Baseline,
 					PatchedBody = tracked.Current,
 				});
