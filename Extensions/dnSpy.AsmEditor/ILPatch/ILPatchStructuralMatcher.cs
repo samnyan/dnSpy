@@ -49,6 +49,69 @@ namespace dnSpy.AsmEditor.ILPatch {
 	static class ILPatchStructuralMatcher {
 		const int MaxCandidates = 5;
 
+		public sealed class Catalog {
+			sealed class CandidateData {
+				public ILPatchMethodIdentity Identity { get; }
+				public Fingerprint Fingerprint { get; }
+				public string BodyHash { get; }
+
+				public CandidateData(ILPatchMethodIdentity identity, Fingerprint fingerprint, string bodyHash) {
+					Identity = identity;
+					Fingerprint = fingerprint;
+					BodyHash = bodyHash;
+				}
+			}
+
+			readonly MethodDef[] methods;
+			readonly Dictionary<MethodDef, CandidateData> cache = new Dictionary<MethodDef, CandidateData>();
+
+			internal Catalog(IEnumerable<MethodDef> methods) {
+				this.methods = methods.Where(a => a is not null && a.Body is not null).Distinct().ToArray();
+			}
+
+			public IReadOnlyList<ILPatchStructuralCandidate> FindCandidates(ILPatchMethodChange patch) {
+				if (patch is null)
+					throw new ArgumentNullException(nameof(patch));
+				if (patch.Target is null || patch.BaseBody is null)
+					return Array.Empty<ILPatchStructuralCandidate>();
+
+				var source = new Fingerprint(patch.Target, patch.BaseBody);
+				var candidates = new List<ILPatchStructuralCandidate>();
+
+				foreach (var method in methods) {
+					var identity = ILPatchMethodIdentity.Create(method);
+					if (!IsCoarseCandidate(source.Identity, identity))
+						continue;
+
+					var current = GetCandidateData(method, identity);
+					double score = Score(source, current.Fingerprint, out string explanation);
+					candidates.Add(new ILPatchStructuralCandidate(method, current.Identity, score, current.BodyHash, explanation));
+				}
+
+				return candidates
+					.OrderByDescending(a => a.Score)
+					.ThenBy(a => a.Identity.ToCanonicalString(), StringComparer.Ordinal)
+					.Take(MaxCandidates)
+					.ToArray();
+			}
+
+			CandidateData GetCandidateData(MethodDef method, ILPatchMethodIdentity identity) {
+				if (cache.TryGetValue(method, out var data))
+					return data;
+				var body = CilNormalizer.CreateSnapshot(method);
+				body.CanonicalHash = ILPatchBodyHasher.Compute(body);
+				data = new CandidateData(identity, new Fingerprint(identity, body), body.CanonicalHash);
+				cache.Add(method, data);
+				return data;
+			}
+		}
+
+		public static Catalog CreateCatalog(IEnumerable<MethodDef> methods) {
+			if (methods is null)
+				throw new ArgumentNullException(nameof(methods));
+			return new Catalog(methods);
+		}
+
 		sealed class Fingerprint {
 			public ILPatchMethodIdentity Identity { get; }
 			public int InstructionCount { get; }
@@ -105,40 +168,6 @@ namespace dnSpy.AsmEditor.ILPatch {
 						OpcodeNgrams.Add(string.Join("\u001F", opcodes.Skip(i).Take(ngramSize)));
 				}
 			}
-		}
-
-		public static IReadOnlyList<ILPatchStructuralCandidate> FindCandidates(ILPatchMethodChange patch,
-			IEnumerable<MethodDef> methods) {
-			if (patch is null)
-				throw new ArgumentNullException(nameof(patch));
-			if (methods is null)
-				throw new ArgumentNullException(nameof(methods));
-			if (patch.Target is null || patch.BaseBody is null)
-				return Array.Empty<ILPatchStructuralCandidate>();
-
-			var source = new Fingerprint(patch.Target, patch.BaseBody);
-			var candidates = new List<ILPatchStructuralCandidate>();
-
-			foreach (var method in methods) {
-				if (method is null || method.Body is null)
-					continue;
-
-				var identity = ILPatchMethodIdentity.Create(method);
-				if (!IsCoarseCandidate(source.Identity, identity))
-					continue;
-
-				var body = CilNormalizer.CreateSnapshot(method);
-				body.CanonicalHash = ILPatchBodyHasher.Compute(body);
-				var current = new Fingerprint(identity, body);
-				double score = Score(source, current, out string explanation);
-				candidates.Add(new ILPatchStructuralCandidate(method, identity, score, body.CanonicalHash, explanation));
-			}
-
-			return candidates
-				.OrderByDescending(a => a.Score)
-				.ThenBy(a => a.Identity.ToCanonicalString(), StringComparer.Ordinal)
-				.Take(MaxCandidates)
-				.ToArray();
 		}
 
 		static bool IsCoarseCandidate(ILPatchMethodIdentity source, ILPatchMethodIdentity candidate) {
