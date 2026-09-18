@@ -152,12 +152,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 					snapshot.CanonicalHash);
 			}
 
-			if (ILPatchRebasedAppliedDetector.TryDetect(patch, target, snapshot, out string rebasedAppliedMessage)) {
+			bool baselineMatches = StringComparer.Ordinal.Equals(snapshot.CanonicalHash, patch.BaseBody.CanonicalHash);
+			if (!baselineMatches &&
+				ILPatchRebasedAppliedDetector.TryDetect(patch, target, snapshot, out string rebasedAppliedMessage)) {
 				return new ILPatchImportResult(patch, ILPatchImportStatus.RebasedApplied, target, candidates.ToArray(),
 					rebasedAppliedMessage, snapshot.CanonicalHash);
 			}
 
-			if (!StringComparer.Ordinal.Equals(snapshot.CanonicalHash, patch.BaseBody.CanonicalHash)) {
+			if (!baselineMatches) {
 				var structuralCandidates = structuralCatalog.FindCandidates(patch);
 				var rebasePreview = ILPatchRebaseAnalyzer.Analyze(patch, target);
 				return new ILPatchImportResult(patch, ILPatchImportStatus.BaseChanged, target, candidates.ToArray(),
