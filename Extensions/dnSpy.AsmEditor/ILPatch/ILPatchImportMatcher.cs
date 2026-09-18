@@ -25,6 +25,7 @@ using dnlib.DotNet;
 namespace dnSpy.AsmEditor.ILPatch {
 	enum ILPatchImportStatus {
 		Exact,
+		AlreadyApplied,
 		BaseChanged,
 		Missing,
 		Ambiguous,
@@ -125,9 +126,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			var snapshot = CilNormalizer.CreateSnapshot(target);
 			snapshot.CanonicalHash = ILPatchBodyHasher.Compute(snapshot);
+			if (StringComparer.Ordinal.Equals(snapshot.CanonicalHash, patch.PatchedBody.CanonicalHash)) {
+				return new ILPatchImportResult(patch, ILPatchImportStatus.AlreadyApplied, target, candidates.ToArray(),
+					"Exact target found and its current body already matches the patched body.",
+					snapshot.CanonicalHash);
+			}
+
 			if (!StringComparer.Ordinal.Equals(snapshot.CanonicalHash, patch.BaseBody.CanonicalHash)) {
 				return new ILPatchImportResult(patch, ILPatchImportStatus.BaseChanged, target, candidates.ToArray(),
-					$"Exact target found, but its current body hash {ShortHash(snapshot.CanonicalHash)} differs from patch baseline {ShortHash(patch.BaseBody.CanonicalHash)}.",
+					$"Exact target found, but its current body hash {ShortHash(snapshot.CanonicalHash)} differs from both patch baseline {ShortHash(patch.BaseBody.CanonicalHash)} and patched body {ShortHash(patch.PatchedBody.CanonicalHash)}.",
 					snapshot.CanonicalHash);
 			}
 
