@@ -303,20 +303,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 		static void PreservedBranchIntoPatchedRangeIsUnsupported() {
 			var target = CreateTarget();
 			var baseline = Snapshot(target,
-				Branch("br", 2),
 				Op("nop"),
 				Ldc(1),
 				Op("ret"));
 			var patched = Snapshot(target,
-				Branch("br", 2),
 				Op("nop"),
 				Ldc(2),
 				Op("ret"));
 			var patch = Change(target, baseline, patched);
 
+			// The newer build inserted a branch that is not part of the stored patch. It targets
+			// the current instruction corresponding to the old ldc.i4 that the patch will replace.
 			var current = Snapshot(target,
-				Op("nop"),
-				Branch("br", 3),
+				Branch("br", 2),
 				Op("nop"),
 				Ldc(1),
 				Op("ret"));
