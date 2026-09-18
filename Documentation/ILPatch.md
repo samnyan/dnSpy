@@ -103,27 +103,33 @@ Future fuzzy matching must fail closed. If multiple target methods score similar
 
 ## Integration with dnSpy undo/redo
 
-The assembly editor already routes edits through `IUndoCommandService`. ILPatch should integrate at this boundary instead of polling every loaded module.
+The assembly editor already routes edits through `IUndoCommandService`, so ILPatch integrates with those existing editing paths instead of polling every loaded module.
 
-The proposed integration is:
+The current implementation captures a method's body before its first mutation:
 
-```
-IUndoCommandService
-  Before Execute/Undo
-      -> identify affected MethodDef targets
-      -> PatchWorkspace.BeginMutation(method)
+- compiler-based C# / VB edits identify the methods affected by the importer;
+- raw IL editing and Replace Body With Stub call `ILPatchWorkspace.EnsureTracked()` through `MethodBodyOptions.CopyTo()`.
 
-  After Execute/Undo
-      -> PatchWorkspace.EndMutation(method, description)
-```
+An auto-loaded undo listener observes Add / Undo / Redo events and refreshes only methods that are already tracked. Imported Exact patches are also applied as one `IUndoCommand`, so one Ctrl+Z reverts the whole imported batch.
 
-Commands that directly know their method should expose it through a small internal target-provider interface. Initial targets:
+This keeps normal tracking O(number of edited methods), while preserving dnSpy's existing save flow and undo semantics.
 
-- `EditMethodBodyCodeCommand` (C# / VB method editing)
-- `EditMethodBodyILCommand` (raw IL editor)
-- `ReplaceILMethodBodyWithStub`
+## Exact import safety
 
-This keeps tracking O(number of edited methods) and avoids rescanning a large assembly after every undoable command.
+Import currently has a deliberately conservative exact-only path:
+
+1. Match a method by stable assembly/module/type/name/signature identity.
+2. Compare the current normalized body hash with the patch baseline.
+3. Report `Exact`, `AlreadyApplied`, `BaseChanged`, `Missing`, or `Ambiguous`.
+4. Re-run the preview immediately before Apply so a stale UI state cannot authorize a mutation.
+5. Materialize every Exact patched body before changing any method.
+6. Apply all successfully preflighted Exact entries as one dnSpy undo command.
+
+MVID is displayed/provided as source provenance but never used as the primary locator.
+
+Normalized metadata references must be rebound to real dnlib objects before writing a body. The v1 materializer intentionally resolves only references already represented by the target module's metadata / method bodies. Unsupported or unresolved operands fail closed and block the batch instead of guessing a token or silently generating the wrong reference.
+
+`BaseChanged` is not auto-applied. Structural matching and three-way rebasing are Phase 4 work.
 
 ## Planned milestones
 
@@ -132,26 +138,26 @@ This keeps tracking O(number of edited methods) and avoids rescanning a large as
 - [x] Versioned in-memory patch model.
 - [x] CIL normalizer and deterministic method-body hash.
 - [x] Workspace model with baseline/current separation and edit history.
-- [ ] Hook method-affecting undo commands into the workspace.
+- [x] Hook method-affecting undo commands into the workspace.
 - [ ] Add tests for normalization stability.
 
 ### Phase 2 - Patch Workspace UI
 
-- [ ] Tool window listing modified methods.
-- [ ] Per-method edit history.
-- [ ] Effective normalized IL diff.
+- [x] Tool window listing modified methods.
+- [x] Per-method edit history.
+- [x] Effective normalized IL diff.
 - [ ] Revert selected method to baseline.
-- [ ] Export selected/all changes.
+- [x] Export all effective changes.
 
 The first UI can show normalized IL. A decompiled C# diff can be added as a convenience view later; it must not become the authoritative patch representation because decompiler output is not stable enough for matching.
 
 ### Phase 3 - `.ilpatch` import/export
 
-- [ ] JSON serialization with explicit format versioning.
-- [ ] Exact method identity + baseline hash validation.
-- [ ] Preview before applying.
-- [ ] Apply through dnSpy's undo command service so imported patches are undoable.
-- [ ] Never write the assembly automatically; saving remains an explicit dnSpy action.
+- [x] JSON serialization with explicit format versioning.
+- [x] Exact method identity + baseline hash validation.
+- [x] Preview before applying with Exact / AlreadyApplied / BaseChanged / Missing / Ambiguous states.
+- [x] Apply Exact entries through dnSpy's undo command service so imported patches are undoable.
+- [x] Never write the assembly automatically; saving remains an explicit dnSpy action.
 
 ### Phase 4 - cross-version rebase
 
