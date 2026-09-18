@@ -617,7 +617,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					.Append(report.PreservedCount)
 					.Append(" unresolved entr")
 					.Append(report.PreservedCount == 1 ? "y." : "ies.")
-					ToString();
+					.ToString();
 				if (report.PreservedReasons.Count != 0) {
 					message += "\n\nPreserved entries:\n" +
 						string.Join("\n", report.PreservedReasons.Take(5).Select(a => "- " + a));
