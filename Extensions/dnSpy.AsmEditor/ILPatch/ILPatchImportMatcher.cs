@@ -26,6 +26,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 	enum ILPatchImportStatus {
 		Exact,
 		AlreadyApplied,
+		RebasedApplied,
 		BaseChanged,
 		Missing,
 		Ambiguous,
@@ -149,6 +150,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return new ILPatchImportResult(patch, ILPatchImportStatus.AlreadyApplied, target, candidates.ToArray(),
 					"Exact target found and its current body already matches the patched body.",
 					snapshot.CanonicalHash);
+			}
+
+			if (ILPatchRebasedAppliedDetector.TryDetect(patch, target, snapshot, out string rebasedAppliedMessage)) {
+				return new ILPatchImportResult(patch, ILPatchImportStatus.RebasedApplied, target, candidates.ToArray(),
+					rebasedAppliedMessage, snapshot.CanonicalHash);
 			}
 
 			if (!StringComparer.Ordinal.Equals(snapshot.CanonicalHash, patch.BaseBody.CanonicalHash)) {
