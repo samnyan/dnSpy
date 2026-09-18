@@ -29,8 +29,10 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
+using dnlib.DotNet;
 using dnSpy.Contracts.App;
 using dnSpy.Contracts.Controls;
+using dnSpy.Contracts.Documents;
 using dnSpy.Contracts.Extension;
 using dnSpy.Contracts.Menus;
 using dnSpy.Contracts.MVVM;
@@ -59,7 +61,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 	[Export(typeof(IToolWindowContentProvider))]
 	sealed class ILPatchToolWindowContentProvider : IToolWindowContentProvider {
+		readonly IDsDocumentService documentService;
 		ILPatchToolWindowContent? content;
+
+		[ImportingConstructor]
+		ILPatchToolWindowContentProvider(IDsDocumentService documentService) =>
+			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
 
 		public IEnumerable<ToolWindowContentInfo> ContentInfos {
 			get { yield return new ToolWindowContentInfo(ILPatchToolWindowContent.THE_GUID, ILPatchToolWindowContent.DEFAULT_LOCATION, 0, false); }
@@ -68,7 +75,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public ToolWindowContent? GetOrCreate(Guid guid) {
 			if (guid != ILPatchToolWindowContent.THE_GUID)
 				return null;
-			return content ??= new ILPatchToolWindowContent();
+			return content ??= new ILPatchToolWindowContent(documentService);
 		}
 	}
 
@@ -76,7 +83,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public static readonly Guid THE_GUID = new Guid("FA3E9EEC-F3A2-47A8-B9B7-4F005C8F2201");
 		public const AppToolWindowLocation DEFAULT_LOCATION = AppToolWindowLocation.DefaultHorizontal;
 
-		readonly ILPatchWorkspaceControl control = new ILPatchWorkspaceControl();
+		readonly ILPatchWorkspaceControl control;
+
+		public ILPatchToolWindowContent(IDsDocumentService documentService) =>
+			control = new ILPatchWorkspaceControl(documentService);
 
 		public override Guid Guid => THE_GUID;
 		public override string Title => "IL Patch Workspace";
@@ -86,30 +96,49 @@ namespace dnSpy.AsmEditor.ILPatch {
 	}
 
 	sealed class ILPatchWorkspaceControl : UserControl {
+		readonly IDsDocumentService documentService;
 		readonly ObservableCollection<ChangeRow> changes = new ObservableCollection<ChangeRow>();
+		readonly ObservableCollection<ImportRow> imports = new ObservableCollection<ImportRow>();
 		readonly ObservableCollection<HistoryRow> history = new ObservableCollection<HistoryRow>();
 		readonly TextBlock summaryText;
+		readonly TextBlock importSummaryText;
 		readonly TextBox diffText;
+		readonly DataGrid importGrid;
+		readonly Button importButton;
 		readonly Button exportButton;
 
 		public DataGrid ChangesGrid { get; }
 
-		public ILPatchWorkspaceControl() {
+		public ILPatchWorkspaceControl(IDsDocumentService documentService) {
+			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
+
 			var root = new Grid { Margin = new Thickness(8) };
 			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 			root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(2, GridUnitType.Star) });
 			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 			root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+			root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
 			var header = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 6) };
+			var actionButtons = new StackPanel { Orientation = Orientation.Horizontal };
+			importButton = new Button {
+				Content = "Import .ilpatch...",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+			};
+			importButton.Click += ImportButton_Click;
+			actionButtons.Children.Add(importButton);
+
 			exportButton = new Button {
 				Content = "Export .ilpatch...",
 				Padding = new Thickness(8, 2, 8, 2),
 				Margin = new Thickness(8, 0, 0, 0),
 			};
 			exportButton.Click += ExportButton_Click;
-			DockPanel.SetDock(exportButton, Dock.Right);
-			header.Children.Add(exportButton);
+			actionButtons.Children.Add(exportButton);
+			DockPanel.SetDock(actionButtons, Dock.Right);
+			header.Children.Add(actionButtons);
 
 			summaryText = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
 			header.Children.Add(summaryText);
@@ -146,12 +175,31 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Grid.SetRow(reviewGrid, 1);
 			root.Children.Add(reviewGrid);
 
+			importSummaryText = new TextBlock {
+				Text = "No .ilpatch file imported for preview.",
+				FontWeight = FontWeights.SemiBold,
+				Margin = new Thickness(0, 8, 0, 4),
+			};
+			Grid.SetRow(importSummaryText, 2);
+			root.Children.Add(importSummaryText);
+
+			importGrid = CreateGrid();
+			importGrid.Columns.Add(CreateTextColumn("Status", nameof(ImportRow.Status), 0.8));
+			importGrid.Columns.Add(CreateTextColumn("Method", nameof(ImportRow.Method), 2.5));
+			importGrid.Columns.Add(CreateTextColumn("Current", nameof(ImportRow.CurrentHash), 1));
+			importGrid.Columns.Add(CreateTextColumn("Baseline", nameof(ImportRow.BaseHash), 1));
+			importGrid.Columns.Add(CreateTextColumn("Details", nameof(ImportRow.Details), 3));
+			importGrid.ItemsSource = imports;
+			importGrid.SelectionChanged += ImportGrid_SelectionChanged;
+			Grid.SetRow(importGrid, 3);
+			root.Children.Add(importGrid);
+
 			var historyTitle = new TextBlock {
 				Text = "Edit history",
 				FontWeight = FontWeights.SemiBold,
 				Margin = new Thickness(0, 8, 0, 4),
 			};
-			Grid.SetRow(historyTitle, 2);
+			Grid.SetRow(historyTitle, 4);
 			root.Children.Add(historyTitle);
 
 			var historyGrid = CreateGrid();
@@ -161,7 +209,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			historyGrid.Columns.Add(CreateTextColumn("Before", nameof(HistoryRow.BeforeHash), 1));
 			historyGrid.Columns.Add(CreateTextColumn("After", nameof(HistoryRow.AfterHash), 1));
 			historyGrid.ItemsSource = history;
-			Grid.SetRow(historyGrid, 3);
+			Grid.SetRow(historyGrid, 5);
 			root.Children.Add(historyGrid);
 
 			Content = root;
@@ -231,6 +279,50 @@ namespace dnSpy.AsmEditor.ILPatch {
 			UpdateDiff(selectedRow);
 		}
 
+		void ImportButton_Click(object sender, RoutedEventArgs e) {
+			var dialog = new OpenFileDialog {
+				Title = "Import IL Patch",
+				Filter = "IL Patch (*.ilpatch)|*.ilpatch|JSON (*.json)|*.json|All files (*.*)|*.*",
+				DefaultExt = ".ilpatch",
+				CheckFileExists = true,
+				Multiselect = false,
+			};
+			if (dialog.ShowDialog(Window.GetWindow(this)) != true)
+				return;
+
+			try {
+				var document = ILPatchSerializer.Load(dialog.FileName);
+				var modules = documentService.GetDocuments().GetModules<ModuleDef>();
+				var preview = ILPatchImportMatcher.CreatePreview(document, modules);
+				ShowImportPreview(dialog.FileName, preview);
+			}
+			catch (Exception ex) {
+				MsgBox.Instance.Show(ex);
+			}
+		}
+
+		void ShowImportPreview(string filename, ILPatchImportPreview preview) {
+			imports.Clear();
+			foreach (var result in preview.Results) {
+				imports.Add(new ImportRow {
+					Result = result,
+					Status = result.Status.ToString(),
+					Method = result.Patch.Target?.ToString() ?? "<invalid patch entry>",
+					CurrentHash = ShortHash(result.CurrentBodyHash),
+					BaseHash = ShortHash(result.Patch.BaseBody?.CanonicalHash),
+					Details = result.Message,
+				});
+			}
+
+			importSummaryText.Text =
+				$"{Path.GetFileName(filename)}: {preview.Results.Count} method(s) — " +
+				$"{preview.Count(ILPatchImportStatus.Exact)} exact, " +
+				$"{preview.Count(ILPatchImportStatus.BaseChanged)} base changed, " +
+				$"{preview.Count(ILPatchImportStatus.Missing)} missing, " +
+				$"{preview.Count(ILPatchImportStatus.Ambiguous)} ambiguous.";
+			importGrid.SelectedItem = imports.FirstOrDefault();
+		}
+
 		void ExportButton_Click(object sender, RoutedEventArgs e) {
 			if (ILPatchWorkspace.Instance.GetEffectiveChanges().Count == 0)
 				return;
@@ -255,7 +347,21 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 		}
 
-		void ChangesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateDiff(ChangesGrid.SelectedItem as ChangeRow);
+		void ChangesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) {
+			var row = ChangesGrid.SelectedItem as ChangeRow;
+			if (row is null)
+				return;
+			importGrid.SelectedItem = null;
+			UpdateDiff(row);
+		}
+
+		void ImportGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) {
+			var row = importGrid.SelectedItem as ImportRow;
+			if (row is null)
+				return;
+			ChangesGrid.SelectedItem = null;
+			diffText.Text = BuildImportReview(row.Result);
+		}
 
 		void UpdateDiff(ChangeRow? row) {
 			if (row is null) {
@@ -263,6 +369,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return;
 			}
 			diffText.Text = BuildInstructionDiff(row.Change);
+		}
+
+		static string BuildImportReview(ILPatchImportResult result) {
+			var builder = new StringBuilder();
+			builder.AppendLine($"Import preview: {result.Status}");
+			builder.AppendLine(result.Message);
+			builder.AppendLine();
+			if (result.Patch.BaseBody is null || result.Patch.PatchedBody is null)
+				return builder.AppendLine("Patch entry does not contain complete method bodies.").ToString();
+			builder.Append(BuildInstructionDiff(result.Patch));
+			return builder.ToString();
 		}
 
 		static string BuildInstructionDiff(ILPatchMethodChange change) {
@@ -324,7 +441,20 @@ namespace dnSpy.AsmEditor.ILPatch {
 				.AppendLine(text);
 		}
 
-		static string ShortHash(string hash) => hash.Length <= 12 ? hash : hash.Substring(0, 12);
+		static string ShortHash(string? hash) {
+			if (string.IsNullOrEmpty(hash))
+				return "—";
+			return hash.Length <= 12 ? hash : hash.Substring(0, 12);
+		}
+
+		sealed class ImportRow {
+			public ILPatchImportResult Result { get; set; } = null!;
+			public string Status { get; set; } = string.Empty;
+			public string Method { get; set; } = string.Empty;
+			public string CurrentHash { get; set; } = string.Empty;
+			public string BaseHash { get; set; } = string.Empty;
+			public string Details { get; set; } = string.Empty;
+		}
 
 		sealed class ChangeRow {
 			public ILPatchMethodChange Change { get; set; } = null!;
