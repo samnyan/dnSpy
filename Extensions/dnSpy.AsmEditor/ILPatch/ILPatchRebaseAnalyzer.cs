@@ -134,12 +134,23 @@ namespace dnSpy.AsmEditor.ILPatch {
 				.SequenceEqual(patch.PatchedBody.ExceptionHandlers.Select(a => a.ToCanonicalString()), StringComparer.Ordinal);
 			bool initLocalsChanged = patch.BaseBody.InitLocals != patch.PatchedBody.InitLocals;
 
-			var baseFull = patch.BaseBody.Instructions.Select(a => a.ToCanonicalString()).ToArray();
-			var patchedFull = patch.PatchedBody.Instructions.Select(a => a.ToCanonicalString()).ToArray();
-			if (!TryGetMatches(baseFull, patchedFull, out var patchMatches, out string error))
+			// First align base -> patched using branch-insensitive keys. A simple insertion can
+			// shift every later branch target instruction index, which must not turn otherwise
+			// unchanged branch instructions into fake patch hunks.
+			var basePatchAlignment = patch.BaseBody.Instructions.Select(CreateAlignmentKey).ToArray();
+			var patchedAlignment = patch.PatchedBody.Instructions.Select(CreateAlignmentKey).ToArray();
+			if (!TryGetMatches(basePatchAlignment, patchedAlignment, out var relaxedPatchMatches, out string error))
 				return Unsupported(target, current.CanonicalHash, error, localsChanged, handlersChanged, initLocalsChanged);
 
-			var diffHunks = CreateDiffHunks(baseFull.Length, patchedFull.Length, patchMatches);
+			var baseToPatched = CreateIndexMap(patch.BaseBody.Instructions.Count, relaxedPatchMatches);
+			var patchMatches = relaxedPatchMatches
+				.Where(pair => InstructionMatchesMappedBaseline(
+					patch.BaseBody.Instructions[pair.Left],
+					patch.PatchedBody.Instructions[pair.Right],
+					baseToPatched))
+				.ToArray();
+
+			var diffHunks = CreateDiffHunks(patch.BaseBody.Instructions.Count, patch.PatchedBody.Instructions.Count, patchMatches);
 			if (diffHunks.Count == 0) {
 				if (localsChanged || handlersChanged || initLocalsChanged) {
 					return Unsupported(target, current.CanonicalHash,
@@ -155,9 +166,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (!TryGetMatches(baseAlignment, newAlignment, out var baseToNewMatches, out error))
 				return Unsupported(target, current.CanonicalHash, error, localsChanged, handlersChanged, initLocalsChanged);
 
-			var baseToNew = new int?[patch.BaseBody.Instructions.Count];
-			foreach (var pair in baseToNewMatches)
-				baseToNew[pair.Left] = pair.Right;
+			var baseToNew = CreateIndexMap(patch.BaseBody.Instructions.Count, baseToNewMatches);
 
 			var hunks = new List<ILPatchRebaseHunk>(diffHunks.Count);
 			foreach (var diff in diffHunks)
@@ -282,7 +291,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		static bool TryMapIndex(int baseIndex, int?[] baseToNew, out int mapped) {
 			if ((uint)baseIndex < (uint)baseToNew.Length && baseToNew[baseIndex].HasValue) {
-				mapped = baseToNew[baseIndex]!.Value;
+				mapped = baseToNew[baseIndex].Value;
 				return true;
 			}
 			mapped = -1;
@@ -299,6 +308,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 			default:
 				return instruction.ToCanonicalString();
 			}
+		}
+
+		static int?[] CreateIndexMap(int sourceCount, IReadOnlyList<MatchPair> matches) {
+			var map = new int?[sourceCount];
+			foreach (var pair in matches) {
+				if ((uint)pair.Left < (uint)map.Length)
+					map[pair.Left] = pair.Right;
+			}
+			return map;
 		}
 
 		static List<DiffHunk> CreateDiffHunks(int baseCount, int patchedCount, IReadOnlyList<MatchPair> matches) {
