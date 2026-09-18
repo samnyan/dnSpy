@@ -16,6 +16,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(SerializerPreservesDistinctOperands), SerializerPreservesDistinctOperands),
 				(nameof(CleanRebasePreservesUpstreamInsertion), CleanRebasePreservesUpstreamInsertion),
 				(nameof(UpstreamEditInsidePatchRangeConflicts), UpstreamEditInsidePatchRangeConflicts),
+				(nameof(UpstreamAppendedLocalCanRebase), UpstreamAppendedLocalCanRebase),
+				(nameof(UpstreamReorderedLocalRemainsUnsupported), UpstreamReorderedLocalRemainsUnsupported),
+				(nameof(UpstreamExceptionHandlerChangeCanRebase), UpstreamExceptionHandlerChangeCanRebase),
 				(nameof(BranchIndexShiftDoesNotCreateFalsePatchHunks), BranchIndexShiftDoesNotCreateFalsePatchHunks),
 				(nameof(RebasedAppliedRoundTripIsDetected), RebasedAppliedRoundTripIsDetected),
 				(nameof(UnappliedUpstreamBodyIsNotRebasedApplied), UnappliedUpstreamBodyIsNotRebasedApplied),
@@ -189,6 +192,86 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var preview = ILPatchRebaseAnalyzer.Analyze(patch, target, upstream);
 			Equal(ILPatchRebaseStatus.Conflict, preview.Status,
 				"Changing the same instruction upstream must not be auto-rebased.");
+		}
+
+		static void UpstreamAppendedLocalCanRebase() {
+			var target = CreateTarget();
+			var baseline = Snapshot(target, Ldc(1), Op("ret"));
+			baseline.Locals.Add("System.Int32");
+			baseline.CanonicalHash = ILPatchBodyHasher.Compute(baseline);
+			var patched = Snapshot(target, Ldc(2), Op("ret"));
+			patched.Locals.Add("System.Int32");
+			patched.CanonicalHash = ILPatchBodyHasher.Compute(patched);
+			var patch = Change(target, baseline, patched);
+
+			var current = Snapshot(target, Ldc(1), Op("ret"));
+			current.Locals.Add("System.Int32");
+			current.Locals.Add("System.String");
+			current.CanonicalHash = ILPatchBodyHasher.Compute(current);
+
+			var preview = ILPatchRebaseAnalyzer.Analyze(patch, target, current);
+			Equal(ILPatchRebaseStatus.Clean, preview.Status, preview.Message);
+			True(preview.LocalsChangedUpstream, "Upstream local append should be detected.");
+			True(preview.UpstreamLocalsCompatible, "Append-only locals should preserve existing slot indexes.");
+			True(ILPatchRebaseMerger.TryCreateMergedSnapshot(patch, preview, out var merged, out string error), error);
+			NotNull(merged, "Merged snapshot was null.");
+			Equal(2, merged!.Locals.Count, "Merged body must preserve the appended upstream local.");
+			Equal("System.Int32", merged.Locals[0], "Existing local slot 0 must remain stable.");
+			Equal("System.String", merged.Locals[1], "Appended upstream local must remain.");
+			Equal(2L, merged.Instructions[0].Operand.IntegerValue, "Patch instruction edit must still apply.");
+		}
+
+		static void UpstreamReorderedLocalRemainsUnsupported() {
+			var target = CreateTarget();
+			var baseline = Snapshot(target, Ldc(1), Op("ret"));
+			baseline.Locals.Add("System.Int32");
+			baseline.Locals.Add("System.String");
+			baseline.CanonicalHash = ILPatchBodyHasher.Compute(baseline);
+			var patched = Snapshot(target, Ldc(2), Op("ret"));
+			patched.Locals.Add("System.Int32");
+			patched.Locals.Add("System.String");
+			patched.CanonicalHash = ILPatchBodyHasher.Compute(patched);
+			var patch = Change(target, baseline, patched);
+
+			var current = Snapshot(target, Ldc(1), Op("ret"));
+			current.Locals.Add("System.String");
+			current.Locals.Add("System.Int32");
+			current.CanonicalHash = ILPatchBodyHasher.Compute(current);
+
+			var preview = ILPatchRebaseAnalyzer.Analyze(patch, target, current);
+			Equal(ILPatchRebaseStatus.Unsupported, preview.Status,
+				"Changing existing local slots must remain fail-closed.");
+			True(preview.LocalsChangedUpstream, "Upstream local reorder should be detected.");
+			False(preview.UpstreamLocalsCompatible, "Reordered locals must not be treated as compatible.");
+		}
+
+		static void UpstreamExceptionHandlerChangeCanRebase() {
+			var target = CreateTarget();
+			var baseline = Snapshot(target, Op("nop"), Ldc(1), Op("ret"));
+			var patched = Snapshot(target, Op("nop"), Ldc(2), Op("ret"));
+			var patch = Change(target, baseline, patched);
+
+			var current = Snapshot(target, Op("nop"), Ldc(1), Op("ret"));
+			current.ExceptionHandlers.Add(new ILPatchExceptionHandler {
+				HandlerType = "Finally",
+				TryStart = 0,
+				TryEnd = 2,
+				HandlerStart = 2,
+				HandlerEnd = -1,
+				FilterStart = -1,
+			});
+			current.CanonicalHash = ILPatchBodyHasher.Compute(current);
+
+			var preview = ILPatchRebaseAnalyzer.Analyze(patch, target, current);
+			Equal(ILPatchRebaseStatus.Clean, preview.Status, preview.Message);
+			True(preview.ExceptionHandlersChangedUpstream, "Upstream EH change should be detected.");
+			True(ILPatchRebaseMerger.TryCreateMergedSnapshot(patch, preview, out var merged, out string error), error);
+			NotNull(merged, "Merged snapshot was null.");
+			Equal(1, merged!.ExceptionHandlers.Count, "Merged body must preserve the upstream EH.");
+			Equal(0, merged.ExceptionHandlers[0].TryStart, "EH try start must remain mapped.");
+			Equal(2, merged.ExceptionHandlers[0].TryEnd, "EH try end must remain mapped.");
+			Equal(2, merged.ExceptionHandlers[0].HandlerStart, "EH handler start must remain mapped.");
+			Equal(2L, merged.Instructions[1].Operand.IntegerValue, "Patch edit must apply under preserved EH metadata.");
 		}
 
 		static void BranchIndexShiftDoesNotCreateFalsePatchHunks() {

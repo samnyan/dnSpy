@@ -175,6 +175,8 @@ Manual candidate selection is session-local until the user explicitly exports an
 
 **Export Rebased .ilpatch...** creates a new patch document. Entries proven safe by Exact, Already/RebasedApplied round-trip recovery, or Clean three-way rebase are rewritten onto the current target/baseline. Conflicting or unsupported entries are preserved unchanged and reported to the user.
 
+For instruction-only patches, clean rebase also preserves a limited set of upstream method-body metadata changes. Existing local slots must remain an exact prefix of the current local list, so locals appended by the newer build are safe while reorders/retypes remain blocked. Upstream exception handlers are taken from the current method and translated through the merged instruction map; if any EH boundary cannot be mapped exactly, materialization fails instead of guessing. Patch-side local/EH/InitLocals edits remain unsupported.
+
 
 
 - [x] Structural method fingerprints (calls, fields, strings, constants, types, locals, opcode n-grams and EH shape).
@@ -184,7 +186,9 @@ Manual candidate selection is session-local until the user explicitly exports an
 - [x] Conflict preview and explicit manual candidate target selection.
 - [x] Detect `RebasedApplied` through a reversible normalized round-trip.
 - [x] Persist accepted target overrides and clean rebases into a newly exported `.ilpatch` while preserving unresolved entries.
-- [ ] Extend safe rebasing across local-layout / exception-handler metadata changes.
+- [x] Preserve append-only upstream local-variable additions when existing slot indexes remain unchanged.
+- [x] Preserve upstream exception-handler changes when all current EH boundaries can be translated into the merged instruction body.
+- [ ] Rebase patch-side local/EH/InitLocals edits and incompatible upstream local-layout changes.
 
 ### Phase 5 - headless application
 

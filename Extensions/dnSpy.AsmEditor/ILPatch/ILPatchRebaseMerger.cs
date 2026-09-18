@@ -73,9 +73,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return false;
 			}
 			if (preview.LocalsChangedByPatch || preview.ExceptionHandlersChangedByPatch ||
-				preview.InitLocalsChangedByPatch || preview.LocalsChangedUpstream ||
-				preview.ExceptionHandlersChangedUpstream) {
-				error = "Method-body metadata is not compatible with instruction-only automatic rebasing.";
+				preview.InitLocalsChangedByPatch) {
+				error = "Patch-side method-body metadata changes are not supported by automatic rebasing.";
+				return false;
+			}
+			if (preview.LocalsChangedUpstream && !preview.UpstreamLocalsCompatible) {
+				error = "The current version changed existing local-variable slots; only append-only upstream local changes are safe.";
 				return false;
 			}
 
