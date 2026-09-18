@@ -19,6 +19,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(UpstreamAppendedLocalCanRebase), UpstreamAppendedLocalCanRebase),
 				(nameof(UpstreamReorderedLocalRemainsUnsupported), UpstreamReorderedLocalRemainsUnsupported),
 				(nameof(UpstreamExceptionHandlerChangeCanRebase), UpstreamExceptionHandlerChangeCanRebase),
+				(nameof(UpstreamRemovedLocalRemainsUnsupported), UpstreamRemovedLocalRemainsUnsupported),
+				(nameof(PreservedBranchIntoPatchedRangeIsUnsupported), PreservedBranchIntoPatchedRangeIsUnsupported),
+				(nameof(ExceptionHandlerBoundaryInsidePatchedRangeIsUnsupported), ExceptionHandlerBoundaryInsidePatchedRangeIsUnsupported),
 				(nameof(BranchIndexShiftDoesNotCreateFalsePatchHunks), BranchIndexShiftDoesNotCreateFalsePatchHunks),
 				(nameof(RebasedAppliedRoundTripIsDetected), RebasedAppliedRoundTripIsDetected),
 				(nameof(UnappliedUpstreamBodyIsNotRebasedApplied), UnappliedUpstreamBodyIsNotRebasedApplied),
@@ -272,6 +275,81 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Equal(2, merged.ExceptionHandlers[0].TryEnd, "EH try end must remain mapped.");
 			Equal(2, merged.ExceptionHandlers[0].HandlerStart, "EH handler start must remain mapped.");
 			Equal(2L, merged.Instructions[1].Operand.IntegerValue, "Patch edit must apply under preserved EH metadata.");
+		}
+
+		static void UpstreamRemovedLocalRemainsUnsupported() {
+			var target = CreateTarget();
+			var baseline = Snapshot(target, Ldc(1), Op("ret"));
+			baseline.Locals.Add("System.Int32");
+			baseline.Locals.Add("System.String");
+			baseline.CanonicalHash = ILPatchBodyHasher.Compute(baseline);
+			var patched = Snapshot(target, Ldc(2), Op("ret"));
+			patched.Locals.Add("System.Int32");
+			patched.Locals.Add("System.String");
+			patched.CanonicalHash = ILPatchBodyHasher.Compute(patched);
+			var patch = Change(target, baseline, patched);
+
+			var current = Snapshot(target, Ldc(1), Op("ret"));
+			current.Locals.Add("System.Int32");
+			current.CanonicalHash = ILPatchBodyHasher.Compute(current);
+
+			var preview = ILPatchRebaseAnalyzer.Analyze(patch, target, current);
+			Equal(ILPatchRebaseStatus.Unsupported, preview.Status,
+				"Removing an existing local slot must remain fail-closed.");
+			True(preview.LocalsChangedUpstream, "Upstream local removal should be detected.");
+			False(preview.UpstreamLocalsCompatible, "Removed locals must not be treated as a compatible prefix.");
+		}
+
+		static void PreservedBranchIntoPatchedRangeIsUnsupported() {
+			var target = CreateTarget();
+			var baseline = Snapshot(target,
+				Branch("br", 2),
+				Op("nop"),
+				Ldc(1),
+				Op("ret"));
+			var patched = Snapshot(target,
+				Branch("br", 2),
+				Op("nop"),
+				Ldc(2),
+				Op("ret"));
+			var patch = Change(target, baseline, patched);
+
+			var current = Snapshot(target,
+				Op("nop"),
+				Branch("br", 3),
+				Op("nop"),
+				Ldc(1),
+				Op("ret"));
+
+			var preview = ILPatchRebaseAnalyzer.Analyze(patch, target, current);
+			Equal(ILPatchRebaseStatus.Unsupported, preview.Status,
+				"A preserved current branch into an instruction replaced by the patch must be rejected during preview.");
+			True(preview.Message.Contains("branches to instruction", StringComparison.Ordinal),
+				"Preview should explain that a preserved branch target cannot be mapped safely.");
+		}
+
+		static void ExceptionHandlerBoundaryInsidePatchedRangeIsUnsupported() {
+			var target = CreateTarget();
+			var baseline = Snapshot(target, Op("nop"), Ldc(1), Op("ret"));
+			var patched = Snapshot(target, Op("nop"), Ldc(2), Op("ret"));
+			var patch = Change(target, baseline, patched);
+
+			var current = Snapshot(target, Op("nop"), Ldc(1), Op("ret"));
+			current.ExceptionHandlers.Add(new ILPatchExceptionHandler {
+				HandlerType = "Finally",
+				TryStart = 1,
+				TryEnd = 2,
+				HandlerStart = 2,
+				HandlerEnd = -1,
+				FilterStart = -1,
+			});
+			current.CanonicalHash = ILPatchBodyHasher.Compute(current);
+
+			var preview = ILPatchRebaseAnalyzer.Analyze(patch, target, current);
+			Equal(ILPatchRebaseStatus.Unsupported, preview.Status,
+				"An EH boundary on an instruction replaced by the patch must be rejected during preview.");
+			True(preview.Message.Contains("exception-handler boundary", StringComparison.Ordinal),
+				"Preview should explain that the EH boundary cannot be remapped safely.");
 		}
 
 		static void BranchIndexShiftDoesNotCreateFalsePatchHunks() {

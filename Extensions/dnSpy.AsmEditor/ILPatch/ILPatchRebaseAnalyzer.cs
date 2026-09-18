@@ -233,11 +233,72 @@ namespace dnSpy.AsmEditor.ILPatch {
 					handlersChangedUpstream, current, baseToPatched, baseToNew);
 			}
 
+			if (!PreservedCurrentReferencesRemainMappable(current, hunks, out string referenceError)) {
+				return new ILPatchRebasePreview(ILPatchRebaseStatus.Unsupported, target, current.CanonicalHash, hunks,
+					referenceError,
+					localsChanged, handlersChanged, initLocalsChanged, localsChangedUpstream, upstreamLocalsCompatible,
+					handlersChangedUpstream, current, baseToPatched, baseToNew);
+			}
+
 			return new ILPatchRebasePreview(ILPatchRebaseStatus.Clean, target, current.CanonicalHash, hunks,
 				"All instruction hunks can be located without overlapping current-version changes. Upstream append-only locals and exception-handler changes are preserved.",
 				localsChanged, handlersChanged, initLocalsChanged, localsChangedUpstream, upstreamLocalsCompatible,
 				handlersChangedUpstream, current, baseToPatched, baseToNew);
 		}
+
+		static bool PreservedCurrentReferencesRemainMappable(ILPatchMethodBodySnapshot current,
+			IReadOnlyList<ILPatchRebaseHunk> hunks, out string error) {
+			error = string.Empty;
+			var removed = new bool[current.Instructions.Count];
+			foreach (var hunk in hunks) {
+				if (hunk.Status != ILPatchRebaseHunkStatus.Clean || hunk.NewLength <= 0)
+					continue;
+				int end = hunk.NewStart + hunk.NewLength;
+				if (hunk.NewStart < 0 || end > removed.Length) {
+					error = "A clean rebase hunk points outside the current method while validating preserved control-flow references.";
+					return false;
+				}
+				for (int i = hunk.NewStart; i < end; i++)
+					removed[i] = true;
+			}
+
+			for (int index = 0; index < current.Instructions.Count; index++) {
+				if (removed[index])
+					continue;
+				var operand = current.Instructions[index].Operand ?? ILPatchOperand.None;
+				switch (operand.Kind) {
+				case ILPatchOperandKind.BranchTarget:
+					if (TargetsRemovedInstruction(operand.Index, removed)) {
+						error = $"Current instruction {index} branches to instruction {operand.Index}, which this patch hunk replaces. The target cannot be mapped conservatively.";
+						return false;
+					}
+					break;
+				case ILPatchOperandKind.SwitchTargets:
+					foreach (int target in operand.Indices ?? Array.Empty<int>()) {
+						if (TargetsRemovedInstruction(target, removed)) {
+							error = $"Current instruction {index} has a switch target {target} that this patch hunk replaces. The target cannot be mapped conservatively.";
+							return false;
+						}
+					}
+					break;
+				}
+			}
+
+			foreach (var handler in current.ExceptionHandlers) {
+				if (TargetsRemovedInstruction(handler.TryStart, removed) ||
+					TargetsRemovedInstruction(handler.TryEnd, removed) ||
+					TargetsRemovedInstruction(handler.HandlerStart, removed) ||
+					TargetsRemovedInstruction(handler.HandlerEnd, removed) ||
+					TargetsRemovedInstruction(handler.FilterStart, removed)) {
+					error = "A current exception-handler boundary points to an instruction replaced by this patch hunk. Automatic rebasing cannot choose an equivalent boundary safely.";
+					return false;
+				}
+			}
+			return true;
+		}
+
+		static bool TargetsRemovedInstruction(int index, bool[] removed) =>
+			index >= 0 && (uint)index < (uint)removed.Length && removed[index];
 
 		static bool LocalsArePrefix(IReadOnlyList<string> baseline, IReadOnlyList<string> current) {
 			if (baseline.Count > current.Count)
