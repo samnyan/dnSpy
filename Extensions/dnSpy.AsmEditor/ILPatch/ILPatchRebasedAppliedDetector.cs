@@ -32,7 +32,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 	/// </summary>
 	static class ILPatchRebasedAppliedDetector {
 		public static bool TryDetect(ILPatchMethodChange patch, MethodDef target,
-			ILPatchMethodBodySnapshot current, out string message) {
+			ILPatchMethodBodySnapshot current, out string message) =>
+			TryRecoverAppliedBase(patch, target, current, out _, out message);
+
+		public static bool TryRecoverAppliedBase(ILPatchMethodChange patch, MethodDef target,
+			ILPatchMethodBodySnapshot current, out ILPatchMethodBodySnapshot? recoveredBase, out string message) {
+			recoveredBase = null;
 			message = string.Empty;
 			if (patch is null)
 				throw new ArgumentNullException(nameof(patch));
@@ -56,7 +61,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return false;
 
 			if (!ILPatchRebaseMerger.TryCreateMergedSnapshot(reverse, reversePreview,
-				out var candidateUpstream, out _ ) || candidateUpstream is null)
+				out var candidateUpstream, out _) || candidateUpstream is null)
 				return false;
 
 			var forwardPreview = ILPatchRebaseAnalyzer.Analyze(patch, target, candidateUpstream);
@@ -64,16 +69,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return false;
 
 			if (!ILPatchRebaseMerger.TryCreateMergedSnapshot(patch, forwardPreview,
-				out var roundTrip, out _ ) || roundTrip is null)
+				out var roundTrip, out _) || roundTrip is null)
 				return false;
 
 			if (!StringComparer.Ordinal.Equals(roundTrip.CanonicalHash, current.CanonicalHash))
 				return false;
 
+			recoveredBase = candidateUpstream;
 			message =
-				"The current method is not byte-for-byte the old patched body, but the patch can be " +
-				"cleanly removed and reapplied with an exact normalized round-trip. It is already " +
-				"present on top of newer upstream IL.";
+				"The current method contains this patch: it can be cleanly removed and reapplied " +
+				"with an exact normalized round-trip.";
 			return true;
 		}
 	}

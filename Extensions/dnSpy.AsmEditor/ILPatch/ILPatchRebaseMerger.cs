@@ -265,9 +265,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		static bool TryTranslateIndex(int sourceIndex, int?[] indexMap, out int translated) {
-			if ((uint)sourceIndex < (uint)indexMap.Length && indexMap[sourceIndex].HasValue) {
-				translated = indexMap[sourceIndex].Value;
-				return true;
+			if ((uint)sourceIndex < (uint)indexMap.Length) {
+				int? value = indexMap[sourceIndex];
+				if (value.HasValue) {
+					translated = value.GetValueOrDefault();
+					return true;
+				}
 			}
 			translated = -1;
 			return false;

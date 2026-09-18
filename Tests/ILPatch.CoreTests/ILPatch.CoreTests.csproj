@@ -20,6 +20,7 @@
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchRebasedAppliedDetector.cs" Link="Core\ILPatchRebasedAppliedDetector.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchStructuralMatcher.cs" Link="Core\ILPatchStructuralMatcher.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchImportMatcher.cs" Link="Core\ILPatchImportMatcher.cs" />
+    <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchDefinitionRebaser.cs" Link="Core\ILPatchDefinitionRebaser.cs" />
   </ItemGroup>
 
 </Project>

@@ -14,6 +14,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(UnappliedUpstreamBodyIsNotRebasedApplied), UnappliedUpstreamBodyIsNotRebasedApplied),
 				(nameof(ManualOverrideCanRetargetRenamedMethod), ManualOverrideCanRetargetRenamedMethod),
 				(nameof(ManualOverrideRejectsSignatureChange), ManualOverrideRejectsSignatureChange),
+				(nameof(UpdatedDefinitionPersistsManualRenamedTarget), UpdatedDefinitionPersistsManualRenamedTarget),
+				(nameof(UpdatedDefinitionRebasesCleanUpstreamChange), UpdatedDefinitionRebasesCleanUpstreamChange),
 			};
 
 			int failed = 0;
@@ -174,6 +176,55 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Equal(ILPatchImportStatus.Incompatible, preview.Results[0].Status,
 				"A manual target with a different parameter signature must be rejected before apply/rebase.");
 			True(preview.Results[0].IsManualTarget, "Rejected override should still be marked as manual.");
+		}
+
+		static void UpdatedDefinitionPersistsManualRenamedTarget() {
+			var oldTarget = CreateNamedIntMethod("OldName", 1);
+			var newTarget = CreateNamedIntMethod("NewName", 1);
+			var patch = CreateRealBodyConstantPatch(oldTarget, 2);
+			var document = new ILPatchDocument();
+			document.Methods.Add(patch);
+			var overrides = new Dictionary<string, ILPatchMethodIdentity>(StringComparer.Ordinal) {
+				[patch.Id] = ILPatchMethodIdentity.Create(newTarget),
+			};
+
+			var preview = ILPatchImportMatcher.CreatePreview(document, new[] { newTarget.Module }, overrides);
+			Equal(ILPatchImportStatus.Exact, preview.Results[0].Status, "Manual renamed target must be Exact before definition update.");
+
+			var updatedDocument = ILPatchDefinitionRebaser.CreateUpdatedDocument(preview, out var report);
+			Equal(1, report.UpdatedCount, "Manual target should produce one updated definition.");
+			Equal(0, report.PreservedCount, "No entry should remain unresolved.");
+			Equal("NewName", updatedDocument.Methods[0].Target.MethodName,
+				"Updated definition must persist the manually selected target identity.");
+			Equal(1L, updatedDocument.Methods[0].BaseBody.Instructions[0].Operand.IntegerValue,
+				"Updated baseline must remain the current unpatched body.");
+			Equal(2L, updatedDocument.Methods[0].PatchedBody.Instructions[0].Operand.IntegerValue,
+				"Updated patched body must preserve the patch edit.");
+		}
+
+		static void UpdatedDefinitionRebasesCleanUpstreamChange() {
+			var oldTarget = CreateNamedIntMethod("Run", 1);
+			var patch = CreateRealBodyConstantPatch(oldTarget, 2);
+			var current = CreateNamedIntMethod("Run", 1);
+			current.Body!.Instructions.Insert(0, new dnlib.DotNet.Emit.Instruction(dnlib.DotNet.Emit.OpCodes.Nop));
+
+			var document = new ILPatchDocument();
+			document.Methods.Add(patch);
+			var preview = ILPatchImportMatcher.CreatePreview(document, new[] { current.Module });
+			Equal(ILPatchImportStatus.BaseChanged, preview.Results[0].Status,
+				"Upstream insertion should produce BaseChanged.");
+			Equal(ILPatchRebaseStatus.Clean, preview.Results[0].RebasePreview?.Status,
+				"Independent upstream insertion should be cleanly rebaseable.");
+
+			var updatedDocument = ILPatchDefinitionRebaser.CreateUpdatedDocument(preview, out var report);
+			Equal(1, report.UpdatedCount, "Clean rebase should update the patch definition.");
+			var updated = updatedDocument.Methods[0];
+			Equal(3, updated.BaseBody.Instructions.Count, "Updated baseline must include the upstream nop.");
+			Equal("nop", updated.BaseBody.Instructions[0].OpCode, "Updated baseline must preserve upstream IL.");
+			Equal(3, updated.PatchedBody.Instructions.Count, "Updated patched body must preserve upstream method shape.");
+			Equal("nop", updated.PatchedBody.Instructions[0].OpCode, "Rebased patch must preserve upstream nop.");
+			Equal(2L, updated.PatchedBody.Instructions[1].Operand.IntegerValue,
+				"Rebased patch must apply the original constant edit on top of upstream IL.");
 		}
 
 		static ILPatchMethodChange CreateRealBodyConstantPatch(MethodDef target, int patchedValue) {

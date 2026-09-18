@@ -128,6 +128,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly Button importButton;
 		readonly Button applyButton;
 		readonly Button rebaseButton;
+		readonly Button exportRebasedButton;
 		readonly Button exportButton;
 		ILPatchImportPreview? importedPreview;
 		string? importedFilename;
@@ -177,6 +178,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 			rebaseButton.Click += RebaseButton_Click;
 			actionButtons.Children.Add(rebaseButton);
+
+			exportRebasedButton = new Button {
+				Content = "Export Rebased .ilpatch...",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+			};
+			exportRebasedButton.Click += ExportRebasedButton_Click;
+			actionButtons.Children.Add(exportRebasedButton);
 
 			exportButton = new Button {
 				Content = "Export .ilpatch...",
@@ -441,6 +451,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				$"{preview.Count(ILPatchImportStatus.Incompatible)} incompatible.";
 			applyButton.IsEnabled = preview.Count(ILPatchImportStatus.Exact) != 0;
 			rebaseButton.IsEnabled = cleanRebase != 0;
+			exportRebasedButton.IsEnabled = preview.Results.Any(CanUpdatePatchDefinition);
 			var selectedRow = selectedPatchId is null
 				? null
 				: imports.FirstOrDefault(a => StringComparer.Ordinal.Equals(a.Result.Patch.Id, selectedPatchId));
@@ -567,6 +578,65 @@ namespace dnSpy.AsmEditor.ILPatch {
 				MsgBox.Instance.Show(ex, "Could not apply the clean IL patch rebase. No further methods were modified.");
 			}
 		}
+
+		void ExportRebasedButton_Click(object sender, RoutedEventArgs e) {
+			if (importedPreview is null || importedFilename is null)
+				return;
+
+			try {
+				var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
+				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
+				ShowImportPreview(importedFilename, preview);
+
+				var updatedDocument = ILPatchDefinitionRebaser.CreateUpdatedDocument(preview, out var report);
+				if (report.UpdatedCount == 0) {
+					MsgBox.Instance.Show("No imported patch entries are currently safe to rebase into a new definition.");
+					return;
+				}
+
+				string sourceName = Path.GetFileNameWithoutExtension(importedFilename);
+				var dialog = new SaveFileDialog {
+					Title = "Export Rebased IL Patch",
+					Filter = "IL Patch (*.ilpatch)|*.ilpatch|JSON (*.json)|*.json|All files (*.*)|*.*",
+					DefaultExt = ".ilpatch",
+					AddExtension = true,
+					OverwritePrompt = true,
+					FileName = sourceName + ".rebased.ilpatch",
+				};
+				if (dialog.ShowDialog(Window.GetWindow(this)) != true)
+					return;
+
+				ILPatchSerializer.Save(dialog.FileName, updatedDocument);
+
+				var message = new StringBuilder()
+					.Append("Saved rebased patch definition. Updated ")
+					.Append(report.UpdatedCount)
+					.Append(" entr")
+					.Append(report.UpdatedCount == 1 ? "y" : "ies")
+					.Append("; preserved ")
+					.Append(report.PreservedCount)
+					.Append(" unresolved entr")
+					.Append(report.PreservedCount == 1 ? "y." : "ies.")
+					ToString();
+				if (report.PreservedReasons.Count != 0) {
+					message += "\n\nPreserved entries:\n" +
+						string.Join("\n", report.PreservedReasons.Take(5).Select(a => "- " + a));
+					if (report.PreservedReasons.Count > 5)
+						message += $"\n- ... and {report.PreservedReasons.Count - 5} more";
+				}
+				MsgBox.Instance.Show(message);
+			}
+			catch (Exception ex) {
+				MsgBox.Instance.Show(ex);
+			}
+		}
+
+		static bool CanUpdatePatchDefinition(ILPatchImportResult result) =>
+			result.Status == ILPatchImportStatus.Exact ||
+			result.Status == ILPatchImportStatus.AlreadyApplied ||
+			result.Status == ILPatchImportStatus.RebasedApplied ||
+			(result.Status == ILPatchImportStatus.BaseChanged &&
+				result.RebasePreview?.Status == ILPatchRebaseStatus.Clean);
 
 		void ExportButton_Click(object sender, RoutedEventArgs e) {
 			if (ILPatchWorkspace.Instance.GetEffectiveChanges().Count == 0)

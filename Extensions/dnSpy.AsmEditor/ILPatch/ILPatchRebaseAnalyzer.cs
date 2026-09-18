@@ -364,9 +364,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		static bool TryMapIndex(int baseIndex, int?[] baseToNew, out int mapped) {
-			if ((uint)baseIndex < (uint)baseToNew.Length && baseToNew[baseIndex].HasValue) {
-				mapped = baseToNew[baseIndex].Value;
-				return true;
+			if ((uint)baseIndex < (uint)baseToNew.Length) {
+				int? value = baseToNew[baseIndex];
+				if (value.HasValue) {
+					mapped = value.GetValueOrDefault();
+					return true;
+				}
 			}
 			mapped = -1;
 			return false;

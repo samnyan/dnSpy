@@ -166,7 +166,9 @@ The first UI can show normalized IL. A decompiled C# diff can be added as a conv
 - [x] Never write the assembly automatically; saving remains an explicit dnSpy action.
 
 ### Phase 4 - cross-version rebase
-Manual candidate selection is intentionally session-local for now. Choosing **Use Candidate** does not mutate the imported file. The selected identity is stored as an in-memory override, the patch is re-evaluated against that method, and Exact/Clean-Rebase safety checks still have to pass. A later explicit "Update Patch Definition" action will persist an accepted mapping.
+Manual candidate selection is session-local until the user explicitly exports an updated definition. Choosing **Use Candidate** stores an in-memory override and re-evaluates Exact/Clean-Rebase safety checks against that method; it never mutates the imported source file in place.
+
+**Export Rebased .ilpatch...** creates a new patch document. Entries proven safe by Exact, Already/RebasedApplied round-trip recovery, or Clean three-way rebase are rewritten onto the current target/baseline. Conflicting or unsupported entries are preserved unchanged and reported to the user.
 
 
 
@@ -176,7 +178,7 @@ Manual candidate selection is intentionally session-local for now. Choosing **Us
 - [x] Three-way clean-hunk materialization and undoable application.
 - [x] Conflict preview and explicit manual candidate target selection.
 - [x] Detect `RebasedApplied` through a reversible normalized round-trip.
-- [ ] Persist an accepted target override / resolved conflict back into a rebased `.ilpatch`.
+- [x] Persist accepted target overrides and clean rebases into a newly exported `.ilpatch` while preserving unresolved entries.
 - [ ] Extend safe rebasing across local-layout / exception-handler metadata changes.
 
 ### Phase 5 - headless application
