@@ -121,6 +121,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly DataGrid importGrid;
 		readonly Button importButton;
 		readonly Button applyButton;
+		readonly Button rebaseButton;
 		readonly Button exportButton;
 		ILPatchImportPreview? importedPreview;
 		string? importedFilename;
@@ -160,6 +161,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 			applyButton.Click += ApplyButton_Click;
 			actionButtons.Children.Add(applyButton);
+
+			rebaseButton = new Button {
+				Content = "Apply Clean Rebase",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+			};
+			rebaseButton.Click += RebaseButton_Click;
+			actionButtons.Children.Add(rebaseButton);
 
 			exportButton = new Button {
 				Content = "Export .ilpatch...",
@@ -371,6 +381,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				$"{preview.Count(ILPatchImportStatus.Missing)} missing, " +
 				$"{preview.Count(ILPatchImportStatus.Ambiguous)} ambiguous.";
 			applyButton.IsEnabled = preview.Count(ILPatchImportStatus.Exact) != 0;
+			rebaseButton.IsEnabled = cleanRebase != 0;
 			importGrid.SelectedItem = imports.FirstOrDefault();
 		}
 
@@ -428,6 +439,69 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 			catch (Exception ex) {
 				MsgBox.Instance.Show(ex, "Could not apply the imported IL patch. No further methods were modified.");
+			}
+		}
+
+		void RebaseButton_Click(object sender, RoutedEventArgs e) {
+			if (importedPreview is null || importedFilename is null)
+				return;
+
+			try {
+				// Re-run matching and three-way analysis immediately before materialization.
+				var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
+				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules);
+				ShowImportPreview(importedFilename, preview);
+
+				var cleanResults = preview.Results
+					.Where(a => a.Status == ILPatchImportStatus.BaseChanged &&
+						a.RebasePreview?.Status == ILPatchRebaseStatus.Clean)
+					.ToArray();
+				if (cleanResults.Length == 0)
+					return;
+
+				var materializers = new Dictionary<ModuleDef, ILPatchBodyMaterializer>();
+				var seenTargets = new HashSet<MethodDef>();
+				var entries = new List<ApplyILPatchCommand.Entry>(cleanResults.Length);
+
+				foreach (var result in cleanResults) {
+					var target = result.Target;
+					var rebase = result.RebasePreview;
+					if (target is null || target.Module is null || rebase is null)
+						throw new InvalidOperationException($"Clean rebase target '{result.Patch.Target}' is no longer available.");
+					if (!seenTargets.Add(target))
+						throw new InvalidOperationException($"The imported patch contains multiple clean rebase entries for '{result.Patch.Target}'. Nothing was applied.");
+
+					if (!ILPatchRebaseMerger.TryCreateMergedSnapshot(result.Patch, rebase, out var mergedSnapshot, out string mergeError) ||
+						mergedSnapshot is null) {
+						MsgBox.Instance.Show($"Cannot rebase '{result.Patch.Target}'.\n\n{mergeError}\n\nNo methods were modified.");
+						return;
+					}
+
+					var methodNode = appService.DocumentTreeView.FindNode(target) as MethodNode;
+					if (methodNode is null)
+						throw new InvalidOperationException($"Could not find the dnSpy document tree node for '{result.Patch.Target}'.");
+
+					if (!materializers.TryGetValue(target.Module, out var materializer))
+						materializers.Add(target.Module, materializer = new ILPatchBodyMaterializer(target.Module));
+
+					if (!materializer.TryCreate(target, mergedSnapshot, out var newBody, out string bodyError) || newBody is null) {
+						MsgBox.Instance.Show($"Cannot materialize rebased body for '{result.Patch.Target}'.\n\n{bodyError}\n\nNo methods were modified.");
+						return;
+					}
+
+					entries.Add(new ApplyILPatchCommand.Entry(methodNode, newBody));
+				}
+
+				// All merges and dnlib bodies were preflighted above. Mutate only now, atomically
+				// from dnSpy's undo/redo point of view.
+				string commandName = string.IsNullOrWhiteSpace(preview.Document.Name)
+					? "clean rebase"
+					: preview.Document.Name + " (clean rebase)";
+				undoCommandService.Add(new ApplyILPatchCommand(methodAnnotations, entries, commandName));
+				RefreshImportedPreview();
+			}
+			catch (Exception ex) {
+				MsgBox.Instance.Show(ex, "Could not apply the clean IL patch rebase. No further methods were modified.");
 			}
 		}
 
