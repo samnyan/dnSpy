@@ -13,7 +13,7 @@ The primary workflow is:
 5. A Patch Workspace shows edit history and the effective baseline -> current IL diff.
 6. Export the effective changes to a versioned `.ilpatch` file.
 7. Open a newer build of the assembly and import the old `.ilpatch`.
-8. Apply exact matches automatically; later versions will support structural matching, three-way rebasing and conflict resolution.
+8. Apply exact matches directly, or review structural candidates and clean three-way rebases when the newer build changed the method.
 
 This is an offline assembly editing feature. It does not inject code or hook the process at runtime.
 
@@ -120,7 +120,7 @@ Import currently has a deliberately conservative exact-only path:
 
 1. Match a method by stable assembly/module/type/name/signature identity.
 2. Compare the current normalized body hash with the patch baseline.
-3. Report `Exact`, `AlreadyApplied`, `BaseChanged`, `Missing`, or `Ambiguous`.
+3. Report `Exact`, `AlreadyApplied`, `RebasedApplied`, `BaseChanged`, `Missing`, `Ambiguous`, or `Incompatible`.
 4. Re-run the preview immediately before Apply so a stale UI state cannot authorize a mutation.
 5. Materialize every Exact patched body before changing any method.
 6. Apply all successfully preflighted Exact entries as one dnSpy undo command.
@@ -129,11 +129,13 @@ MVID is displayed/provided as source provenance but never used as the primary lo
 
 Normalized metadata references must be rebound to real dnlib objects before writing a body. The v1 materializer intentionally resolves only references already represented by the target module's metadata / method bodies. Unsupported or unresolved operands fail closed and block the batch instead of guessing a token or silently generating the wrong reference.
 
-`BaseChanged` is not auto-applied. Structural matching and three-way rebasing are Phase 4 work.
+`BaseChanged` is never treated as an Exact apply. When three-way analysis proves that all patch hunks are clean and method-body metadata remains compatible, the user can explicitly choose **Apply Clean Rebase**. Structural candidates remain advisory until the user explicitly selects one as a temporary target override.
 
 ## CI
 
-The fork's GitHub Actions workflow is enabled and feature-branch pushes are used to validate this implementation on Windows across all supported build targets.
+The fork's GitHub Actions workflow is enabled and feature-branch pushes validate the implementation across all supported Windows build targets.
+
+Before the Windows build matrix starts, a lightweight `ILPatch.CoreTests` console project runs regression tests directly against the linked core source files. This keeps rebase/matching regressions independent from the WPF/MEF application startup path.
 
 ## Planned milestones
 
@@ -143,7 +145,7 @@ The fork's GitHub Actions workflow is enabled and feature-branch pushes are used
 - [x] CIL normalizer and deterministic method-body hash.
 - [x] Workspace model with baseline/current separation and edit history.
 - [x] Hook method-affecting undo commands into the workspace.
-- [ ] Add tests for normalization stability.
+- [x] Add core regression tests for normalization/hash stability and rebase behavior.
 
 ### Phase 2 - Patch Workspace UI
 
@@ -159,18 +161,23 @@ The first UI can show normalized IL. A decompiled C# diff can be added as a conv
 
 - [x] JSON serialization with explicit format versioning.
 - [x] Exact method identity + baseline hash validation.
-- [x] Preview before applying with Exact / AlreadyApplied / BaseChanged / Missing / Ambiguous states.
+- [x] Preview before applying with Exact / AlreadyApplied / RebasedApplied / BaseChanged / Missing / Ambiguous / Incompatible states.
 - [x] Apply Exact entries through dnSpy's undo command service so imported patches are undoable.
 - [x] Never write the assembly automatically; saving remains an explicit dnSpy action.
 
 ### Phase 4 - cross-version rebase
+Manual candidate selection is intentionally session-local for now. Choosing **Use Candidate** does not mutate the imported file. The selected identity is stored as an in-memory override, the patch is re-evaluated against that method, and Exact/Clean-Rebase safety checks still have to pass. A later explicit "Update Patch Definition" action will persist an accepted mapping.
 
-- [ ] Structural method fingerprints (calls, fields, strings, opcode n-grams, CFG).
-- [ ] Candidate scoring with Exact / Strong / Ambiguous states.
-- [ ] Instruction alignment between old and new normalized bodies.
-- [ ] Three-way hunk application.
-- [ ] Conflict UI and manual target selection.
-- [ ] Rebase/update an `.ilpatch` after a conflict is resolved.
+
+
+- [x] Structural method fingerprints (calls, fields, strings, constants, types, locals, opcode n-grams and EH shape).
+- [x] Advisory candidate scoring with score/margin display.
+- [x] Instruction alignment between old baseline, old patched and new current bodies.
+- [x] Three-way clean-hunk materialization and undoable application.
+- [x] Conflict preview and explicit manual candidate target selection.
+- [x] Detect `RebasedApplied` through a reversible normalized round-trip.
+- [ ] Persist an accepted target override / resolved conflict back into a rebased `.ilpatch`.
+- [ ] Extend safe rebasing across local-layout / exception-handler metadata changes.
 
 ### Phase 5 - headless application
 

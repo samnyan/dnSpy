@@ -116,10 +116,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly ObservableCollection<ChangeRow> changes = new ObservableCollection<ChangeRow>();
 		readonly ObservableCollection<ImportRow> imports = new ObservableCollection<ImportRow>();
 		readonly ObservableCollection<HistoryRow> history = new ObservableCollection<HistoryRow>();
+		readonly Dictionary<string, ILPatchMethodIdentity> targetOverrides =
+			new Dictionary<string, ILPatchMethodIdentity>(StringComparer.Ordinal);
 		readonly TextBlock summaryText;
 		readonly TextBlock importSummaryText;
 		readonly TextBox diffText;
 		readonly DataGrid importGrid;
+		readonly ComboBox candidateSelector;
+		readonly Button useCandidateButton;
+		readonly Button clearCandidateButton;
 		readonly Button importButton;
 		readonly Button applyButton;
 		readonly Button rebaseButton;
@@ -141,6 +146,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(2, GridUnitType.Star) });
 			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 			root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 			root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
@@ -239,12 +245,54 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Grid.SetRow(importGrid, 3);
 			root.Children.Add(importGrid);
 
+			var candidateBar = new DockPanel {
+				LastChildFill = true,
+				Margin = new Thickness(0, 6, 0, 0),
+			};
+			var candidateButtons = new StackPanel { Orientation = Orientation.Horizontal };
+			useCandidateButton = new Button {
+				Content = "Use Candidate",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+			};
+			useCandidateButton.Click += UseCandidateButton_Click;
+			candidateButtons.Children.Add(useCandidateButton);
+
+			clearCandidateButton = new Button {
+				Content = "Clear Target Override",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+			};
+			clearCandidateButton.Click += ClearCandidateButton_Click;
+			candidateButtons.Children.Add(clearCandidateButton);
+			DockPanel.SetDock(candidateButtons, Dock.Right);
+			candidateBar.Children.Add(candidateButtons);
+
+			var candidateLabel = new TextBlock {
+				Text = "Candidate target:",
+				VerticalAlignment = VerticalAlignment.Center,
+				Margin = new Thickness(0, 0, 8, 0),
+			};
+			DockPanel.SetDock(candidateLabel, Dock.Left);
+			candidateBar.Children.Add(candidateLabel);
+
+			candidateSelector = new ComboBox {
+				MinWidth = 420,
+				IsEnabled = false,
+			};
+			candidateSelector.SelectionChanged += CandidateSelector_SelectionChanged;
+			candidateBar.Children.Add(candidateSelector);
+			Grid.SetRow(candidateBar, 4);
+			root.Children.Add(candidateBar);
+
 			var historyTitle = new TextBlock {
 				Text = "Edit history",
 				FontWeight = FontWeights.SemiBold,
 				Margin = new Thickness(0, 8, 0, 4),
 			};
-			Grid.SetRow(historyTitle, 4);
+			Grid.SetRow(historyTitle, 5);
 			root.Children.Add(historyTitle);
 
 			var historyGrid = CreateGrid();
@@ -254,7 +302,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			historyGrid.Columns.Add(CreateTextColumn("Before", nameof(HistoryRow.BeforeHash), 1));
 			historyGrid.Columns.Add(CreateTextColumn("After", nameof(HistoryRow.AfterHash), 1));
 			historyGrid.ItemsSource = history;
-			Grid.SetRow(historyGrid, 5);
+			Grid.SetRow(historyGrid, 6);
 			root.Children.Add(historyGrid);
 
 			Content = root;
@@ -342,8 +390,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			try {
 				var document = ILPatchSerializer.Load(dialog.FileName);
+				targetOverrides.Clear();
 				var modules = documentService.GetDocuments().GetModules<ModuleDef>();
-				var preview = ILPatchImportMatcher.CreatePreview(document, modules);
+				var preview = ILPatchImportMatcher.CreatePreview(document, modules, targetOverrides);
 				ShowImportPreview(dialog.FileName, preview);
 			}
 			catch (Exception ex) {
@@ -352,19 +401,26 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		void ShowImportPreview(string filename, ILPatchImportPreview preview) {
+			string? selectedPatchId = (importGrid.SelectedItem as ImportRow)?.Result.Patch.Id;
 			importedFilename = filename;
 			importedPreview = preview;
 			imports.Clear();
 			foreach (var result in preview.Results) {
 				var bestCandidate = result.StructuralCandidates.FirstOrDefault();
+				var selectedCandidate = result.IsManualTarget && result.Target is not null
+					? result.StructuralCandidates.FirstOrDefault(a => ReferenceEquals(a.Method, result.Target))
+					: null;
+				var displayedCandidate = selectedCandidate ?? bestCandidate;
 				imports.Add(new ImportRow {
 					Result = result,
-					Status = result.Status.ToString(),
+					Status = result.IsManualTarget ? result.Status + " (manual)" : result.Status.ToString(),
 					Method = result.Patch.Target?.ToString() ?? "<invalid patch entry>",
 					CurrentHash = ShortHash(result.CurrentBodyHash),
 					BaseHash = ShortHash(result.Patch.BaseBody?.CanonicalHash),
-					Candidate = bestCandidate?.Identity.ToString() ?? "—",
-					Score = bestCandidate is null ? "—" : $"{bestCandidate.Score:P1}",
+					Candidate = result.IsManualTarget && result.Target is not null
+						? "Manual: " + ILPatchMethodIdentity.Create(result.Target)
+						: displayedCandidate?.Identity.ToString() ?? "—",
+					Score = displayedCandidate is null ? "—" : $"{displayedCandidate.Score:P1}",
 					Rebase = result.RebasePreview?.Status.ToString() ?? "—",
 					Details = BuildCandidateSummary(result),
 				});
@@ -381,17 +437,22 @@ namespace dnSpy.AsmEditor.ILPatch {
 				$"{preview.Count(ILPatchImportStatus.BaseChanged)} base changed " +
 				$"(rebase: {cleanRebase} clean / {conflictRebase} conflict / {unsupportedRebase} unsupported), " +
 				$"{preview.Count(ILPatchImportStatus.Missing)} missing, " +
-				$"{preview.Count(ILPatchImportStatus.Ambiguous)} ambiguous.";
+				$"{preview.Count(ILPatchImportStatus.Ambiguous)} ambiguous, " +
+				$"{preview.Count(ILPatchImportStatus.Incompatible)} incompatible.";
 			applyButton.IsEnabled = preview.Count(ILPatchImportStatus.Exact) != 0;
 			rebaseButton.IsEnabled = cleanRebase != 0;
-			importGrid.SelectedItem = imports.FirstOrDefault();
+			var selectedRow = selectedPatchId is null
+				? null
+				: imports.FirstOrDefault(a => StringComparer.Ordinal.Equals(a.Result.Patch.Id, selectedPatchId));
+			importGrid.SelectedItem = selectedRow ?? imports.FirstOrDefault();
+			UpdateCandidateControls(importGrid.SelectedItem as ImportRow);
 		}
 
 		void RefreshImportedPreview() {
 			if (importedPreview is null || importedFilename is null)
 				return;
 			var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
-			var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules);
+			var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
 			ShowImportPreview(importedFilename, preview);
 		}
 
@@ -402,7 +463,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			try {
 				// Revalidate immediately before mutation so a stale preview can never authorize an apply.
 				var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
-				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules);
+				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
 				ShowImportPreview(importedFilename, preview);
 
 				var exactResults = preview.Results.Where(a => a.Status == ILPatchImportStatus.Exact).ToArray();
@@ -451,7 +512,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			try {
 				// Re-run matching and three-way analysis immediately before materialization.
 				var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
-				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules);
+				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
 				ShowImportPreview(importedFilename, preview);
 
 				var cleanResults = preview.Results
@@ -541,10 +602,72 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		void ImportGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) {
 			var row = importGrid.SelectedItem as ImportRow;
+			UpdateCandidateControls(row);
 			if (row is null)
 				return;
 			ChangesGrid.SelectedItem = null;
 			diffText.Text = BuildImportReview(row.Result);
+		}
+
+		void CandidateSelector_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+			UpdateUseCandidateButton();
+
+		void UpdateCandidateControls(ImportRow? row) {
+			candidateSelector.Items.Clear();
+			candidateSelector.IsEnabled = false;
+			useCandidateButton.IsEnabled = false;
+			clearCandidateButton.IsEnabled = false;
+			if (row is null)
+				return;
+
+			string patchId = row.Result.Patch.Id ?? string.Empty;
+			clearCandidateButton.IsEnabled = targetOverrides.ContainsKey(patchId);
+			targetOverrides.TryGetValue(patchId, out var currentOverride);
+
+			CandidateChoice? selectedChoice = null;
+			foreach (var candidate in row.Result.StructuralCandidates) {
+				var choice = new CandidateChoice(candidate,
+					ILPatchImportMatcher.SignaturesCompatible(row.Result.Patch.Target, candidate.Identity));
+				candidateSelector.Items.Add(choice);
+				if (currentOverride is not null &&
+					StringComparer.Ordinal.Equals(currentOverride.ToCanonicalString(), candidate.Identity.ToCanonicalString()))
+					selectedChoice = choice;
+			}
+
+			candidateSelector.IsEnabled = candidateSelector.Items.Count != 0;
+			candidateSelector.SelectedItem = selectedChoice ?? candidateSelector.Items.Cast<object>().FirstOrDefault();
+			UpdateUseCandidateButton();
+		}
+
+		void UpdateUseCandidateButton() {
+			var row = importGrid.SelectedItem as ImportRow;
+			var choice = candidateSelector.SelectedItem as CandidateChoice;
+			useCandidateButton.IsEnabled = row is not null && choice?.IsCompatible == true;
+		}
+
+		void UseCandidateButton_Click(object sender, RoutedEventArgs e) {
+			var row = importGrid.SelectedItem as ImportRow;
+			var choice = candidateSelector.SelectedItem as CandidateChoice;
+			if (row is null || choice is null || !choice.IsCompatible)
+				return;
+
+			string patchId = row.Result.Patch.Id ?? string.Empty;
+			if (string.IsNullOrEmpty(patchId)) {
+				MsgBox.Instance.Show("This patch entry has no stable id and cannot keep a target override.");
+				return;
+			}
+
+			targetOverrides[patchId] = choice.Candidate.Identity;
+			RefreshImportedPreview();
+		}
+
+		void ClearCandidateButton_Click(object sender, RoutedEventArgs e) {
+			var row = importGrid.SelectedItem as ImportRow;
+			if (row is null)
+				return;
+			string patchId = row.Result.Patch.Id ?? string.Empty;
+			if (targetOverrides.Remove(patchId))
+				RefreshImportedPreview();
 		}
 
 		void UpdateDiff(ChangeRow? row) {
@@ -557,8 +680,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		static string BuildImportReview(ILPatchImportResult result) {
 			var builder = new StringBuilder();
-			builder.AppendLine($"Import preview: {result.Status}");
+			builder.AppendLine($"Import preview: {result.Status}{(result.IsManualTarget ? " (manual target)" : string.Empty)}");
 			builder.AppendLine(result.Message);
+			if (result.IsManualTarget && result.Target is not null)
+				builder.AppendLine($"Selected target: {ILPatchMethodIdentity.Create(result.Target)}");
 			if (result.RebasePreview is not null) {
 				var rebase = result.RebasePreview;
 				builder.AppendLine();
@@ -693,6 +818,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (string.IsNullOrEmpty(hash))
 				return "—";
 			return hash.Length <= 12 ? hash : hash.Substring(0, 12);
+		}
+
+		sealed class CandidateChoice {
+			public ILPatchStructuralCandidate Candidate { get; }
+			public bool IsCompatible { get; }
+
+			public CandidateChoice(ILPatchStructuralCandidate candidate, bool isCompatible) {
+				Candidate = candidate ?? throw new ArgumentNullException(nameof(candidate));
+				IsCompatible = isCompatible;
+			}
+
+			public override string ToString() =>
+				$"{Candidate.Score:P1}  {Candidate.Identity}  [{(IsCompatible ? "compatible" : "signature mismatch")}]";
 		}
 
 		sealed class ImportRow {

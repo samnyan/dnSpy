@@ -12,6 +12,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(BranchIndexShiftDoesNotCreateFalsePatchHunks), BranchIndexShiftDoesNotCreateFalsePatchHunks),
 				(nameof(RebasedAppliedRoundTripIsDetected), RebasedAppliedRoundTripIsDetected),
 				(nameof(UnappliedUpstreamBodyIsNotRebasedApplied), UnappliedUpstreamBodyIsNotRebasedApplied),
+				(nameof(ManualOverrideCanRetargetRenamedMethod), ManualOverrideCanRetargetRenamedMethod),
+				(nameof(ManualOverrideRejectsSignatureChange), ManualOverrideRejectsSignatureChange),
 			};
 
 			int failed = 0;
@@ -126,6 +128,75 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			False(ILPatchRebasedAppliedDetector.TryDetect(patch, target, upstream, out _),
 				"An upstream-only body must not be mistaken for an already-rebased patch.");
+		}
+
+		static void ManualOverrideCanRetargetRenamedMethod() {
+			var oldTarget = CreateNamedIntMethod("OldName", 1);
+			var newTarget = CreateNamedIntMethod("NewName", 1);
+			var patch = Change(oldTarget,
+				Snapshot(oldTarget, Ldc(1), Op("ret")),
+				Snapshot(oldTarget, Ldc(2), Op("ret")));
+			var document = new ILPatchDocument();
+			document.Methods.Add(patch);
+
+			var automatic = ILPatchImportMatcher.CreatePreview(document, new[] { newTarget.Module });
+			Equal(ILPatchImportStatus.Missing, automatic.Results[0].Status,
+				"A renamed method should not be silently selected by structural matching.");
+
+			var overrides = new Dictionary<string, ILPatchMethodIdentity>(StringComparer.Ordinal) {
+				[patch.Id] = ILPatchMethodIdentity.Create(newTarget),
+			};
+			var manual = ILPatchImportMatcher.CreatePreview(document, new[] { newTarget.Module }, overrides);
+			Equal(ILPatchImportStatus.Exact, manual.Results[0].Status,
+				"A manually selected renamed method with the same signature and baseline should become Exact.");
+			True(manual.Results[0].IsManualTarget, "Manual target flag should be preserved in preview.");
+			True(ReferenceEquals(newTarget, manual.Results[0].Target), "Preview should resolve to the selected MethodDef.");
+		}
+
+		static void ManualOverrideRejectsSignatureChange() {
+			var oldTarget = CreateNamedIntMethod("OldName", 1);
+			var module = CreateModule();
+			var type = new TypeDefUser("Tests", "Fixture", module.CorLibTypes.Object.TypeDefOrRef);
+			module.Types.Add(type);
+			var incompatible = new MethodDefUser("NewName",
+				MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32));
+			incompatible.Body = new dnlib.DotNet.Emit.CilBody();
+			incompatible.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ldarg_0));
+			incompatible.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
+			type.Methods.Add(incompatible);
+
+			var patch = Change(oldTarget,
+				Snapshot(oldTarget, Ldc(1), Op("ret")),
+				Snapshot(oldTarget, Ldc(2), Op("ret")));
+			var document = new ILPatchDocument();
+			document.Methods.Add(patch);
+			var overrides = new Dictionary<string, ILPatchMethodIdentity>(StringComparer.Ordinal) {
+				[patch.Id] = ILPatchMethodIdentity.Create(incompatible),
+			};
+
+			var preview = ILPatchImportMatcher.CreatePreview(document, new[] { module }, overrides);
+			Equal(ILPatchImportStatus.Incompatible, preview.Results[0].Status,
+				"A manual target with a different parameter signature must be rejected before apply/rebase.");
+			True(preview.Results[0].IsManualTarget, "Rejected override should still be marked as manual.");
+		}
+
+		static ModuleDef CreateModule() {
+			var module = new ModuleDefUser("Assembly-CSharp.dll");
+			var assembly = new AssemblyDefUser("Assembly-CSharp", new Version(1, 0, 0, 0));
+			assembly.Modules.Add(module);
+			return module;
+		}
+
+		static MethodDef CreateNamedIntMethod(string name, int constant) {
+			var module = CreateModule();
+			var type = new TypeDefUser("Tests", "Fixture", module.CorLibTypes.Object.TypeDefOrRef);
+			module.Types.Add(type);
+			var method = new MethodDefUser(name, MethodSig.CreateStatic(module.CorLibTypes.Int32));
+			method.Body = new dnlib.DotNet.Emit.CilBody();
+			method.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.CreateLdcI4(constant));
+			method.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
+			type.Methods.Add(method);
+			return method;
 		}
 
 		static MethodDef CreateTarget() {

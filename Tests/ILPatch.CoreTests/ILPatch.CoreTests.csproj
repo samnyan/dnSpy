@@ -18,6 +18,8 @@
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchRebaseAnalyzer.cs" Link="Core\ILPatchRebaseAnalyzer.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchRebaseMerger.cs" Link="Core\ILPatchRebaseMerger.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchRebasedAppliedDetector.cs" Link="Core\ILPatchRebasedAppliedDetector.cs" />
+    <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchStructuralMatcher.cs" Link="Core\ILPatchStructuralMatcher.cs" />
+    <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchImportMatcher.cs" Link="Core\ILPatchImportMatcher.cs" />
   </ItemGroup>
 
 </Project>
