@@ -169,10 +169,13 @@ The first UI can show normalized IL. A decompiled C# diff can be added as a conv
 - [x] Preview before applying with Exact / AlreadyApplied / RebasedApplied / BaseChanged / Missing / Ambiguous / Incompatible states.
 - [x] Apply Exact entries through dnSpy's undo command service so imported patches are undoable.
 - [x] Multi-file GUI import for independent method targets, with source-file provenance shown per row.
+- [x] Apply Exact + Clean-Rebase entries together as one preflighted, undoable **Apply Safe** batch.
 - [x] Reject duplicate patch ids or overlapping target methods in one GUI batch so order-dependent patches must be applied/rebased sequentially.
 - [x] Never write the assembly automatically; saving remains an explicit dnSpy action.
 
 The import dialog supports selecting multiple `.ilpatch` files. Independent entries are combined into one preview and one undoable application batch, while the **Source** column keeps each method traceable to its original patch file. The batch composer intentionally refuses two selected files that target the same method identity: those patches may depend on application order, so silently flattening them against one pre-mutation baseline would be unsafe.
+
+**Apply Safe** is the batch convenience action. It revalidates the whole preview, materializes every `Exact` entry and every `BaseChanged + Clean` entry first, then submits all of them as one dnSpy undo command. `AlreadyApplied` / `RebasedApplied` entries are skipped and unresolved entries remain untouched in the preview. The separate **Apply Exact** and **Apply Clean Rebase** actions remain available when the user wants finer control.
 
 ### Phase 4 - cross-version rebase
 Manual candidate selection is session-local until the user explicitly exports an updated definition. Choosing **Use Candidate** stores an in-memory override and re-evaluates Exact/Clean-Rebase safety checks against that method; it never mutates the imported source file in place.

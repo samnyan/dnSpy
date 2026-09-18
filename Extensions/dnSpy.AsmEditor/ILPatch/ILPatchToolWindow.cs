@@ -131,6 +131,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly Button importButton;
 		readonly Button applyButton;
 		readonly Button rebaseButton;
+		readonly Button applySafeButton;
 		readonly Button exportRebasedButton;
 		readonly Button exportButton;
 		ILPatchImportPreview? importedPreview;
@@ -191,6 +192,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 			rebaseButton.Click += RebaseButton_Click;
 			actionButtons.Children.Add(rebaseButton);
+
+			applySafeButton = new Button {
+				Content = "Apply Safe",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+			};
+			applySafeButton.Click += ApplySafeButton_Click;
+			actionButtons.Children.Add(applySafeButton);
 
 			exportRebasedButton = new Button {
 				Content = "Export Rebased .ilpatch...",
@@ -527,6 +537,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				$"{preview.Count(ILPatchImportStatus.Incompatible)} incompatible.";
 			applyButton.IsEnabled = preview.Count(ILPatchImportStatus.Exact) != 0;
 			rebaseButton.IsEnabled = cleanRebase != 0;
+			applySafeButton.IsEnabled = applyButton.IsEnabled || rebaseButton.IsEnabled;
 			exportRebasedButton.IsEnabled = preview.Results.Any(CanUpdatePatchDefinition);
 			var selectedRow = selectedPatchId is null
 				? null
@@ -543,88 +554,65 @@ namespace dnSpy.AsmEditor.ILPatch {
 			ShowImportPreview(importedSourceLabel, importedDefaultBaseName, preview);
 		}
 
-		void ApplyButton_Click(object sender, RoutedEventArgs e) {
+		void ApplyButton_Click(object sender, RoutedEventArgs e) =>
+			ApplyImportedChanges(includeExact: true, includeCleanRebase: false, "Could not apply the imported IL patch.");
+
+		void RebaseButton_Click(object sender, RoutedEventArgs e) =>
+			ApplyImportedChanges(includeExact: false, includeCleanRebase: true, "Could not apply the clean IL patch rebase.");
+
+		void ApplySafeButton_Click(object sender, RoutedEventArgs e) =>
+			ApplyImportedChanges(includeExact: true, includeCleanRebase: true, "Could not apply the safe IL patch batch.");
+
+		void ApplyImportedChanges(bool includeExact, bool includeCleanRebase, string failureTitle) {
 			if (importedPreview is null || importedSourceLabel is null || importedDefaultBaseName is null)
 				return;
 
 			try {
-				// Revalidate immediately before mutation so a stale preview can never authorize an apply.
+				// Re-run matching immediately before materialization so a stale preview or changed
+				// manual target override can never authorize a mutation.
 				var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
 				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
-				ShowImportPreview(importedSourceLabel!, importedDefaultBaseName!, preview);
+				ShowImportPreview(importedSourceLabel, importedDefaultBaseName, preview);
 
-				var exactResults = preview.Results.Where(a => a.Status == ILPatchImportStatus.Exact).ToArray();
-				if (exactResults.Length == 0)
+				var selectedResults = preview.Results
+					.Where(result =>
+						(includeExact && result.Status == ILPatchImportStatus.Exact) ||
+						(includeCleanRebase &&
+							result.Status == ILPatchImportStatus.BaseChanged &&
+							result.RebasePreview?.Status == ILPatchRebaseStatus.Clean))
+					.ToArray();
+				if (selectedResults.Length == 0)
 					return;
 
 				var materializers = new Dictionary<ModuleDef, ILPatchBodyMaterializer>();
 				var seenTargets = new HashSet<MethodDef>();
-				var entries = new List<ApplyILPatchCommand.Entry>(exactResults.Length);
+				var entries = new List<ApplyILPatchCommand.Entry>(selectedResults.Length);
 
-				foreach (var result in exactResults) {
+				foreach (var result in selectedResults) {
 					var target = result.Target;
 					if (target is null || target.Module is null)
-						throw new InvalidOperationException($"Exact patch target '{result.Patch.Target}' is no longer available.");
-					if (!seenTargets.Add(target))
-						throw new InvalidOperationException($"The imported patch contains multiple Exact entries for '{result.Patch.Target}'. Nothing was applied.");
-
-					var methodNode = appService.DocumentTreeView.FindNode(target) as MethodNode;
-					if (methodNode is null)
-						throw new InvalidOperationException($"Could not find the dnSpy document tree node for '{result.Patch.Target}'.");
-
-					if (!materializers.TryGetValue(target.Module, out var materializer))
-						materializers.Add(target.Module, materializer = new ILPatchBodyMaterializer(target.Module));
-
-					if (!materializer.TryCreate(target, result.Patch.PatchedBody, out var newBody, out string error) || newBody is null) {
-						MsgBox.Instance.Show($"Cannot apply '{result.Patch.Target}'.\n\n{error}\n\nNo methods were modified.");
-						return;
+						throw new InvalidOperationException($"Patch target '{result.Patch.Target}' is no longer available.");
+					if (!seenTargets.Add(target)) {
+						throw new InvalidOperationException(
+							$"Multiple selected patch entries resolve to '{ILPatchMethodIdentity.Create(target)}'. " +
+							"Nothing was applied; resolve the target collision or apply the files sequentially.");
 					}
 
-					entries.Add(new ApplyILPatchCommand.Entry(methodNode, newBody));
-				}
-
-				// One undo command makes this batch atomic from the user's point of view.
-				undoCommandService.Add(new ApplyILPatchCommand(methodAnnotations, entries, preview.Document.Name));
-				RefreshImportedPreview();
-			}
-			catch (Exception ex) {
-				MsgBox.Instance.Show(ex, "Could not apply the imported IL patch. No further methods were modified.");
-			}
-		}
-
-		void RebaseButton_Click(object sender, RoutedEventArgs e) {
-			if (importedPreview is null || importedSourceLabel is null || importedDefaultBaseName is null)
-				return;
-
-			try {
-				// Re-run matching and three-way analysis immediately before materialization.
-				var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
-				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
-				ShowImportPreview(importedSourceLabel!, importedDefaultBaseName!, preview);
-
-				var cleanResults = preview.Results
-					.Where(a => a.Status == ILPatchImportStatus.BaseChanged &&
-						a.RebasePreview?.Status == ILPatchRebaseStatus.Clean)
-					.ToArray();
-				if (cleanResults.Length == 0)
-					return;
-
-				var materializers = new Dictionary<ModuleDef, ILPatchBodyMaterializer>();
-				var seenTargets = new HashSet<MethodDef>();
-				var entries = new List<ApplyILPatchCommand.Entry>(cleanResults.Length);
-
-				foreach (var result in cleanResults) {
-					var target = result.Target;
-					var rebase = result.RebasePreview;
-					if (target is null || target.Module is null || rebase is null)
-						throw new InvalidOperationException($"Clean rebase target '{result.Patch.Target}' is no longer available.");
-					if (!seenTargets.Add(target))
-						throw new InvalidOperationException($"The imported patch contains multiple clean rebase entries for '{result.Patch.Target}'. Nothing was applied.");
-
-					if (!ILPatchRebaseMerger.TryCreateMergedSnapshot(result.Patch, rebase, out var mergedSnapshot, out string mergeError) ||
-						mergedSnapshot is null) {
-						MsgBox.Instance.Show($"Cannot rebase '{result.Patch.Target}'.\n\n{mergeError}\n\nNo methods were modified.");
-						return;
+					ILPatchMethodBodySnapshot bodySnapshot;
+					if (result.Status == ILPatchImportStatus.Exact) {
+						bodySnapshot = result.Patch.PatchedBody;
+					}
+					else {
+						var rebase = result.RebasePreview;
+						if (rebase is null)
+							throw new InvalidOperationException($"Clean rebase analysis for '{result.Patch.Target}' is no longer available.");
+						if (!ILPatchRebaseMerger.TryCreateMergedSnapshot(result.Patch, rebase,
+							out var mergedSnapshot, out string mergeError) || mergedSnapshot is null) {
+							MsgBox.Instance.Show(
+								$"Cannot rebase '{result.Patch.Target}'.\n\n{mergeError}\n\nNo methods were modified.");
+							return;
+						}
+						bodySnapshot = mergedSnapshot;
 					}
 
 					var methodNode = appService.DocumentTreeView.FindNode(target) as MethodNode;
@@ -634,24 +622,30 @@ namespace dnSpy.AsmEditor.ILPatch {
 					if (!materializers.TryGetValue(target.Module, out var materializer))
 						materializers.Add(target.Module, materializer = new ILPatchBodyMaterializer(target.Module));
 
-					if (!materializer.TryCreate(target, mergedSnapshot, out var newBody, out string bodyError) || newBody is null) {
-						MsgBox.Instance.Show($"Cannot materialize rebased body for '{result.Patch.Target}'.\n\n{bodyError}\n\nNo methods were modified.");
+					if (!materializer.TryCreate(target, bodySnapshot, out var newBody, out string bodyError) ||
+						newBody is null) {
+						MsgBox.Instance.Show(
+							$"Cannot materialize '{result.Patch.Target}'.\n\n{bodyError}\n\nNo methods were modified.");
 						return;
 					}
 
 					entries.Add(new ApplyILPatchCommand.Entry(methodNode, newBody));
 				}
 
-				// All merges and dnlib bodies were preflighted above. Mutate only now, atomically
-				// from dnSpy's undo/redo point of view.
-				string commandName = string.IsNullOrWhiteSpace(preview.Document.Name)
-					? "clean rebase"
-					: preview.Document.Name + " (clean rebase)";
+				string baseName = string.IsNullOrWhiteSpace(preview.Document.Name) ? "IL patch" : preview.Document.Name;
+				string commandName = includeExact && includeCleanRebase
+					? baseName + " (safe apply)"
+					: includeCleanRebase
+						? baseName + " (clean rebase)"
+						: baseName;
+
+				// Every selected result has been merged/materialized above. Only now mutate, as one
+				// dnSpy undo command, so Exact + Clean-Rebase batches remain atomic.
 				undoCommandService.Add(new ApplyILPatchCommand(methodAnnotations, entries, commandName));
 				RefreshImportedPreview();
 			}
 			catch (Exception ex) {
-				MsgBox.Instance.Show(ex, "Could not apply the clean IL patch rebase. No further methods were modified.");
+				MsgBox.Instance.Show(ex, failureTitle + " No methods were modified.");
 			}
 		}
 
