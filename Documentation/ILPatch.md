@@ -211,7 +211,8 @@ The MVP is deliberately fail-closed:
 - `BaseChanged + Clean` -> three-way rebase and apply;
 - `Missing`, `Ambiguous`, `Incompatible`, rebase conflict or unsupported materialization -> fail the command;
 - a failed command never writes the output assembly;
-- the source DLL is never overwritten in place.
+- the source DLL is never overwritten in place;
+- output/report paths are rejected if they would overwrite the input assembly or any source `.ilpatch` file, and output/report paths may not alias each other.
 
 Exit codes are `0` for success, `1` for usage/I/O/unexpected failures and `2` for unresolved patch entries.
 

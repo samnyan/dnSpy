@@ -53,6 +53,27 @@ jobs:
           mkdir -p "$fixture"
           dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- create-cli-fixture "$fixture"
 
+          set +e
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            apply "$fixture/input.dll" "$fixture/patches" \
+            -o "$fixture/patches/001-change.ilpatch"
+          patch_collision_exit=$?
+
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            apply --dry-run "$fixture/input.dll" "$fixture/patches" \
+            --json "$fixture/input.dll"
+          report_collision_exit=$?
+          set -e
+
+          if [ "$patch_collision_exit" -ne 1 ]; then
+            echo "Expected patch-output collision exit code 1, got $patch_collision_exit" >&2
+            exit 1
+          fi
+          if [ "$report_collision_exit" -ne 1 ]; then
+            echo "Expected report-input collision exit code 1, got $report_collision_exit" >&2
+            exit 1
+          fi
+
           dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
             apply "$fixture/input.dll" "$fixture/patches" \
             -o "$fixture/output.dll" --json "$fixture/success-report.json"

@@ -90,11 +90,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				if (!File.Exists(patchPath))
 					throw new FileNotFoundException("Patch file was not found.", patchPath);
 			}
-			if (!options.DryRun && outputPath is not null &&
-				StringComparer.OrdinalIgnoreCase.Equals(inputPath, outputPath)) {
-				throw new InvalidOperationException(
-					"Input and output must be different files. ILPatch CLI never overwrites the source assembly in place.");
-			}
+			ValidateWriteDestinations(inputPath, outputPath, jsonReportPath, patchPaths, options.DryRun);
 
 			using var module = ModuleDefMD.Load(inputPath);
 			Console.WriteLine($"Loaded: {inputPath}");
@@ -210,6 +206,30 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 			return true;
 		}
+
+		static void ValidateWriteDestinations(string inputPath, string? outputPath,
+			string? jsonReportPath, IReadOnlyList<string> patchPaths, bool dryRun) {
+			if (!dryRun && outputPath is not null) {
+				if (PathsEqual(inputPath, outputPath))
+					throw new InvalidOperationException(
+						"Input and output must be different files. ILPatch CLI never overwrites the source assembly in place.");
+				if (patchPaths.Any(a => PathsEqual(a, outputPath)))
+					throw new InvalidOperationException(
+						"Output assembly path must not overwrite an input .ilpatch file.");
+			}
+
+			if (jsonReportPath is null)
+				return;
+			if (PathsEqual(inputPath, jsonReportPath))
+				throw new InvalidOperationException("JSON report path must not overwrite the input assembly.");
+			if (patchPaths.Any(a => PathsEqual(a, jsonReportPath)))
+				throw new InvalidOperationException("JSON report path must not overwrite an input .ilpatch file.");
+			if (outputPath is not null && PathsEqual(outputPath, jsonReportPath))
+				throw new InvalidOperationException("Output assembly and JSON report paths must be different files.");
+		}
+
+		static bool PathsEqual(string first, string second) =>
+			StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(first), Path.GetFullPath(second));
 
 		static string[] ExpandPatchPaths(IEnumerable<string> values) {
 			var result = new List<string>();
