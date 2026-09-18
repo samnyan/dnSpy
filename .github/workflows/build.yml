@@ -22,6 +22,10 @@ concurrency:
 
 jobs:
   build:
+    # Feature branches in this repository are already covered by the push trigger.
+    # Keep pull_request builds for PRs coming from external forks without running
+    # the same matrix twice for our own feature/** branches.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     name: Build (${{ matrix.platform }})
     runs-on: windows-latest
     timeout-minutes: 45
