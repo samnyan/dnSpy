@@ -147,6 +147,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			switch (operand.Kind) {
 			case ILPatchOperandKind.None:
+				if (opCode.OperandType != OperandType.InlineNone) {
+					error = $"Missing operand for opcode operand type {opCode.OperandType}.";
+					return false;
+				}
 				return true;
 
 			case ILPatchOperandKind.Integer:
@@ -186,10 +190,18 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return false;
 
 			case ILPatchOperandKind.String:
+				if (opCode.OperandType != OperandType.InlineString) {
+					error = $"String operand is incompatible with opcode operand type {opCode.OperandType}.";
+					return false;
+				}
 				value = operand.Text ?? string.Empty;
 				return true;
 
 			case ILPatchOperandKind.Argument:
+				if (opCode.OperandType != OperandType.ShortInlineVar && opCode.OperandType != OperandType.InlineVar) {
+					error = $"Argument operand is incompatible with opcode operand type {opCode.OperandType}.";
+					return false;
+				}
 				if ((uint)operand.Index >= (uint)target.Parameters.Count) {
 					error = $"Argument index {operand.Index} is outside target parameter range.";
 					return false;
@@ -198,6 +210,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return true;
 
 			case ILPatchOperandKind.Local:
+				if (opCode.OperandType != OperandType.ShortInlineVar && opCode.OperandType != OperandType.InlineVar) {
+					error = $"Local operand is incompatible with opcode operand type {opCode.OperandType}.";
+					return false;
+				}
 				if ((uint)operand.Index >= (uint)body.Variables.Count) {
 					error = $"Local index {operand.Index} is outside patched local range.";
 					return false;
@@ -206,6 +222,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return true;
 
 			case ILPatchOperandKind.BranchTarget:
+				if (opCode.OperandType != OperandType.ShortInlineBrTarget && opCode.OperandType != OperandType.InlineBrTarget) {
+					error = $"Branch operand is incompatible with opcode operand type {opCode.OperandType}.";
+					return false;
+				}
 				if (!TryGetInstruction(body, operand.Index, false, out var branchTarget)) {
 					error = $"Branch target index {operand.Index} is invalid.";
 					return false;
@@ -214,6 +234,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return true;
 
 			case ILPatchOperandKind.SwitchTargets:
+				if (opCode.OperandType != OperandType.InlineSwitch) {
+					error = $"Switch operand is incompatible with opcode operand type {opCode.OperandType}.";
+					return false;
+				}
 				var indices = operand.Indices ?? Array.Empty<int>();
 				var targets = new Instruction[indices.Length];
 				for (int i = 0; i < indices.Length; i++) {
@@ -227,6 +251,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return true;
 
 			case ILPatchOperandKind.Type:
+				if (opCode.OperandType != OperandType.InlineType && opCode.OperandType != OperandType.InlineTok) {
+					error = $"Type operand is incompatible with opcode operand type {opCode.OperandType}.";
+					return false;
+				}
 				if (!TryResolveType(target, operand.Text, out var type)) {
 					error = $"Could not resolve type '{operand.Text}' from existing target metadata.";
 					return false;
@@ -235,6 +263,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return true;
 
 			case ILPatchOperandKind.Method:
+				if (opCode.OperandType != OperandType.InlineMethod && opCode.OperandType != OperandType.InlineTok) {
+					error = $"Method operand is incompatible with opcode operand type {opCode.OperandType}.";
+					return false;
+				}
 				if (!TryResolveMethod(target, operand.Text, out var method)) {
 					error = $"Could not resolve method '{operand.Text}' from existing target metadata.";
 					return false;
@@ -243,6 +275,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return true;
 
 			case ILPatchOperandKind.Field:
+				if (opCode.OperandType != OperandType.InlineField && opCode.OperandType != OperandType.InlineTok) {
+					error = $"Field operand is incompatible with opcode operand type {opCode.OperandType}.";
+					return false;
+				}
 				if (!TryResolveField(target, operand.Text, out var field)) {
 					error = $"Could not resolve field '{operand.Text}' from existing target metadata.";
 					return false;
