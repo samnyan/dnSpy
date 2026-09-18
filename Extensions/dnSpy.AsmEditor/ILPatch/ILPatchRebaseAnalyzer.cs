@@ -66,10 +66,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public bool LocalsChangedByPatch { get; }
 		public bool ExceptionHandlersChangedByPatch { get; }
 		public bool InitLocalsChangedByPatch { get; }
+		public bool LocalsChangedUpstream { get; }
+		public bool ExceptionHandlersChangedUpstream { get; }
+		internal ILPatchMethodBodySnapshot? CurrentBody { get; }
+		internal int?[]? BaseToPatched { get; }
+		internal int?[]? BaseToCurrent { get; }
 
 		public ILPatchRebasePreview(ILPatchRebaseStatus status, MethodDef target, string currentBodyHash,
 			IReadOnlyList<ILPatchRebaseHunk> hunks, string message, bool localsChangedByPatch = false,
-			bool exceptionHandlersChangedByPatch = false, bool initLocalsChangedByPatch = false) {
+			bool exceptionHandlersChangedByPatch = false, bool initLocalsChangedByPatch = false,
+			bool localsChangedUpstream = false, bool exceptionHandlersChangedUpstream = false,
+			ILPatchMethodBodySnapshot? currentBody = null, int?[]? baseToPatched = null, int?[]? baseToCurrent = null) {
 			Status = status;
 			Target = target ?? throw new ArgumentNullException(nameof(target));
 			CurrentBodyHash = currentBodyHash ?? string.Empty;
@@ -78,6 +85,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 			LocalsChangedByPatch = localsChangedByPatch;
 			ExceptionHandlersChangedByPatch = exceptionHandlersChangedByPatch;
 			InitLocalsChangedByPatch = initLocalsChangedByPatch;
+			LocalsChangedUpstream = localsChangedUpstream;
+			ExceptionHandlersChangedUpstream = exceptionHandlersChangedUpstream;
+			CurrentBody = currentBody;
+			BaseToPatched = baseToPatched;
+			BaseToCurrent = baseToCurrent;
 		}
 	}
 
@@ -161,7 +173,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 						localsChanged, handlersChanged, initLocalsChanged);
 				}
 				return new ILPatchRebasePreview(ILPatchRebaseStatus.Clean, target, current.CanonicalHash,
-					Array.Empty<ILPatchRebaseHunk>(), "The stored patch contains no effective instruction hunk.");
+					Array.Empty<ILPatchRebaseHunk>(), "The stored patch contains no effective instruction hunk.",
+					currentBody: current);
 			}
 
 			var baseAlignment = patch.BaseBody.Instructions.Select(CreateAlignmentKey).ToArray();
@@ -170,6 +183,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return Unsupported(target, current.CanonicalHash, error, localsChanged, handlersChanged, initLocalsChanged);
 
 			var baseToNew = CreateIndexMap(patch.BaseBody.Instructions.Count, baseToNewMatches);
+			bool localsChangedUpstream = !patch.BaseBody.Locals.SequenceEqual(current.Locals, StringComparer.Ordinal);
+			bool handlersChangedUpstream = !ExceptionHandlersEquivalentAfterMapping(
+				patch.BaseBody.ExceptionHandlers,
+				current.ExceptionHandlers,
+				baseToNew);
 
 			var hunks = new List<ILPatchRebaseHunk>(diffHunks.Count);
 			foreach (var diff in diffHunks)
@@ -179,17 +197,28 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (hasConflict) {
 				return new ILPatchRebasePreview(ILPatchRebaseStatus.Conflict, target, current.CanonicalHash, hunks,
 					"At least one patch hunk overlaps or cannot be unambiguously aligned with changes in the current method.",
-					localsChanged, handlersChanged, initLocalsChanged);
+					localsChanged, handlersChanged, initLocalsChanged, localsChangedUpstream, handlersChangedUpstream,
+					current, baseToPatched, baseToNew);
 			}
 
 			if (localsChanged || handlersChanged || initLocalsChanged) {
 				return new ILPatchRebasePreview(ILPatchRebaseStatus.Unsupported, target, current.CanonicalHash, hunks,
 					"Instruction hunks do not overlap upstream changes, but the patch also changes locals, exception handlers or InitLocals. Extended body metadata rebasing is still required.",
-					localsChanged, handlersChanged, initLocalsChanged);
+					localsChanged, handlersChanged, initLocalsChanged, localsChangedUpstream, handlersChangedUpstream,
+					current, baseToPatched, baseToNew);
+			}
+
+			if (localsChangedUpstream || handlersChangedUpstream) {
+				return new ILPatchRebasePreview(ILPatchRebaseStatus.Unsupported, target, current.CanonicalHash, hunks,
+					"Instruction hunks do not overlap, but the current version changed local-variable layout or exception-handler structure relative to the stored baseline. Automatic instruction-only rebasing is intentionally blocked.",
+					localsChanged, handlersChanged, initLocalsChanged, localsChangedUpstream, handlersChangedUpstream,
+					current, baseToPatched, baseToNew);
 			}
 
 			return new ILPatchRebasePreview(ILPatchRebaseStatus.Clean, target, current.CanonicalHash, hunks,
-				"All instruction hunks can be located without overlapping current-version changes. This is analysis only; merged-body materialization is not enabled yet.");
+				"All instruction hunks can be located without overlapping current-version changes, and method-body metadata remains compatible.",
+				localsChanged, handlersChanged, initLocalsChanged, localsChangedUpstream, handlersChangedUpstream,
+				current, baseToPatched, baseToNew);
 		}
 
 		static ILPatchRebasePreview Unsupported(MethodDef target, string hash, string message,
