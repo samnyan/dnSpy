@@ -66,6 +66,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 					VerifyCliReport(args[1], bool.Parse(args[2]), int.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture));
 					return 0;
 				}
+				if (args.Length == 2 && StringComparer.Ordinal.Equals(args[0], "verify-cli-rebased-output")) {
+					VerifyCliRebasedOutput(args[1]);
+					return 0;
+				}
+				if (args.Length == 4 && StringComparer.Ordinal.Equals(args[0], "verify-cli-rebase-report")) {
+					VerifyCliRebaseReport(args[1], bool.Parse(args[2]), int.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture));
+					return 0;
+				}
 				Console.Error.WriteLine("Unknown ILPatch.CoreTests utility command.");
 				return 2;
 			}
@@ -81,6 +89,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			string inputPath = Path.Combine(directory, "input.dll");
 			string conflictInputPath = Path.Combine(directory, "conflict-input.dll");
+			string rebaseInputPath = Path.Combine(directory, "rebase-input.dll");
 			string patchDirectory = Path.Combine(directory, "patches");
 			Directory.CreateDirectory(patchDirectory);
 			string patchPath = Path.Combine(patchDirectory, "001-change.ilpatch");
@@ -96,8 +105,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var conflictMethod = CreateNamedIntMethod("Run", 3);
 			conflictMethod.Module.Write(conflictInputPath);
 
+			var rebaseMethod = CreateNamedIntMethod("Run", 1);
+			rebaseMethod.Body!.Instructions.Insert(0,
+				new dnlib.DotNet.Emit.Instruction(dnlib.DotNet.Emit.OpCodes.Nop));
+			rebaseMethod.Module.Write(rebaseInputPath);
+
 			Console.WriteLine(inputPath);
 			Console.WriteLine(conflictInputPath);
+			Console.WriteLine(rebaseInputPath);
 			Console.WriteLine(patchPath);
 		}
 
@@ -111,6 +126,50 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Equal(2L, snapshot.Instructions[0].Operand.IntegerValue,
 				"CLI process output assembly must contain the patched IL.");
 			Console.WriteLine("CLI process output verified.");
+		}
+
+		static void VerifyCliRebasedOutput(string outputPath) {
+			outputPath = Path.GetFullPath(outputPath);
+			using var module = ModuleDefMD.Load(outputPath);
+			var method = module.GetTypes()
+				.SelectMany(a => a.Methods)
+				.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Run"));
+			var snapshot = CilNormalizer.CreateSnapshot(method);
+			Equal(3, snapshot.Instructions.Count,
+				"Rebased CLI output must preserve the newer-build instruction count.");
+			Equal("nop", snapshot.Instructions[0].OpCode,
+				"Rebased CLI output must preserve the upstream nop.");
+			Equal(2L, snapshot.Instructions[1].Operand.IntegerValue,
+				"Rebased CLI output must apply the stored constant edit.");
+			Console.WriteLine("CLI rebased output verified.");
+		}
+
+		static void VerifyCliRebaseReport(string reportPath, bool expectedSuccess, int expectedExitCode) {
+			reportPath = Path.GetFullPath(reportPath);
+			var json = JObject.Parse(File.ReadAllText(reportPath));
+			Equal(1, (int?)json["formatVersion"] ?? -1, "CLI rebase JSON report format version mismatch.");
+			Equal(expectedSuccess, (bool?)json["success"] ?? !expectedSuccess,
+				"CLI rebase JSON report success flag mismatch.");
+			Equal(expectedExitCode, (int?)json["exitCode"] ?? -1,
+				"CLI rebase JSON report exit code mismatch.");
+			Equal(expectedSuccess, (bool?)json["outputWritten"] ?? !expectedSuccess,
+				"CLI rebase JSON report outputWritten mismatch.");
+			Equal(expectedSuccess ? 1 : 0, (int?)json["updatedCount"] ?? -1,
+				"CLI rebase JSON report updatedCount mismatch.");
+			Equal(expectedSuccess ? 0 : 1, (int?)json["unresolvedCount"] ?? -1,
+				"CLI rebase JSON report unresolvedCount mismatch.");
+			var entries = json["entries"] as JArray;
+			True(entries is not null && entries.Count == 1,
+				"CLI rebase JSON report must contain exactly one fixture entry.");
+			Equal(expectedSuccess, (bool?)entries![0]?["updated"] ?? !expectedSuccess,
+				"CLI rebase entry updated flag mismatch.");
+			if (expectedSuccess) {
+				Equal("BaseChanged", (string?)entries[0]?["status"],
+					"Successful rebase fixture should report BaseChanged.");
+				Equal("Clean", (string?)entries[0]?["rebaseStatus"],
+					"Successful rebase fixture should report a Clean three-way rebase.");
+			}
+			Console.WriteLine("CLI rebase JSON report verified.");
 		}
 
 		static void VerifyCliReport(string reportPath, bool expectedSuccess, int expectedExitCode) {

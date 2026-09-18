@@ -100,6 +100,47 @@ jobs:
           dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
             verify-cli-report "$fixture/conflict-report.json" false 2
 
+          set +e
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            rebase "$fixture/rebase-input.dll" "$fixture/patches/001-change.ilpatch" \
+            -o "$fixture/patches/001-change.ilpatch"
+          rebase_overwrite_exit=$?
+          set -e
+          if [ "$rebase_overwrite_exit" -ne 1 ]; then
+            echo "Expected source-patch overwrite protection exit code 1, got $rebase_overwrite_exit" >&2
+            exit 1
+          fi
+
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            rebase "$fixture/rebase-input.dll" "$fixture/patches/001-change.ilpatch" \
+            -o "$fixture/rebased.ilpatch" --json "$fixture/rebase-report.json"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-rebase-report "$fixture/rebase-report.json" true 0
+
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            apply "$fixture/rebase-input.dll" "$fixture/rebased.ilpatch" \
+            -o "$fixture/rebased-output.dll"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-rebased-output "$fixture/rebased-output.dll"
+
+          set +e
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            rebase "$fixture/conflict-input.dll" "$fixture/patches/001-change.ilpatch" \
+            -o "$fixture/conflict-rebased.ilpatch" --json "$fixture/conflict-rebase-report.json"
+          rebase_conflict_exit=$?
+          set -e
+
+          if [ "$rebase_conflict_exit" -ne 2 ]; then
+            echo "Expected rebase conflict exit code 2, got $rebase_conflict_exit" >&2
+            exit 1
+          fi
+          if [ -e "$fixture/conflict-rebased.ilpatch" ]; then
+            echo "Conflicting rebase must not write an output patch." >&2
+            exit 1
+          fi
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-rebase-report "$fixture/conflict-rebase-report.json" false 2
+
       - name: Publish portable ILPatch CLI
         run: dotnet publish Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release -p:UseAppHost=false -o "$RUNNER_TEMP/ilpatch-portable"
 

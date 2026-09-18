@@ -206,6 +206,9 @@ ilpatch apply --dry-run Assembly-CSharp.dll patches/001.ilpatch patches/002.ilpa
 
 # Write a machine-readable report for CI/MCP/batch tooling.
 ilpatch apply Assembly-CSharp.dll patches/001.ilpatch -o Assembly-CSharp.patched.dll --json ilpatch-report.json
+
+# Move one resolved patch definition onto a newer assembly baseline without modifying the DLL.
+ilpatch rebase Assembly-CSharp.new.dll patches/001.ilpatch -o patches/001.rebased.ilpatch --json rebase-report.json
 ```
 
 The MVP is deliberately fail-closed:
@@ -224,6 +227,8 @@ Exit codes are `0` for success, `1` for usage/I/O/unexpected failures and `2` fo
 
 The CLI currently accepts already-resolved patch definitions. Structural candidates are printed for diagnosis but never auto-selected; use the dnSpy Patch Workspace to confirm a manual candidate and **Export Rebased .ilpatch...** before headless deployment.
 
+`ilpatch rebase` is the headless equivalent of exporting an updated definition for one patch file. It never edits the target assembly and never overwrites the source patch. Every entry must be safely updateable through Exact, Already/RebasedApplied recovery, or a Clean three-way rebase; otherwise the command exits with code 2 and writes no rebased patch. Its optional JSON report records per-entry import/rebase status and whether the output patch was written.
+
 - [x] Extract method-body materialization into pure dnlib core code.
 - [x] Add a pure headless apply engine shared by automation code.
 - [x] Add `Tools/ILPatch.Cli` with sequential multi-patch and `--dry-run` support.
@@ -233,6 +238,7 @@ The CLI currently accepts already-resolved patch definitions. Structural candida
 - [x] Publish portable and Windows x64 CLI packages as CI artifacts.
 - [x] Wire release events to attach portable and Windows x64 CLI archives to GitHub Releases.
 - [x] Add machine-readable JSON report output for success and conflict paths.
+- [x] Add fail-closed `ilpatch rebase` for moving a resolved patch definition onto a newer assembly baseline.
 - [ ] Add explicit partial-apply mode only if a real workflow needs it.
 
 ## Non-goals for the first version
