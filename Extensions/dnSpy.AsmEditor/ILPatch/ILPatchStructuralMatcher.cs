@@ -50,6 +50,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 		const int MaxCandidates = 5;
 
 		public sealed class Catalog {
+			sealed class CandidateHeader {
+				public MethodDef Method { get; }
+				public ILPatchMethodIdentity Identity { get; }
+
+				public CandidateHeader(MethodDef method, ILPatchMethodIdentity identity) {
+					Method = method;
+					Identity = identity;
+				}
+			}
+
 			sealed class CandidateData {
 				public ILPatchMethodIdentity Identity { get; }
 				public Fingerprint Fingerprint { get; }
@@ -62,11 +72,18 @@ namespace dnSpy.AsmEditor.ILPatch {
 				}
 			}
 
-			readonly MethodDef[] methods;
+			readonly Dictionary<string, List<CandidateHeader>> coarseIndex =
+				new Dictionary<string, List<CandidateHeader>>(StringComparer.Ordinal);
 			readonly Dictionary<MethodDef, CandidateData> cache = new Dictionary<MethodDef, CandidateData>();
 
 			internal Catalog(IEnumerable<MethodDef> methods) {
-				this.methods = methods.Where(a => a is not null && a.Body is not null).Distinct().ToArray();
+				foreach (var method in methods.Where(a => a is not null && a.Body is not null).Distinct()) {
+					var identity = ILPatchMethodIdentity.Create(method);
+					string key = CreateCoarseKey(identity);
+					if (!coarseIndex.TryGetValue(key, out var bucket))
+						coarseIndex.Add(key, bucket = new List<CandidateHeader>());
+					bucket.Add(new CandidateHeader(method, identity));
+				}
 			}
 
 			public IReadOnlyList<ILPatchStructuralCandidate> FindCandidates(ILPatchMethodChange patch) {
@@ -75,17 +92,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 				if (patch.Target is null || patch.BaseBody is null)
 					return Array.Empty<ILPatchStructuralCandidate>();
 
+				if (!coarseIndex.TryGetValue(CreateCoarseKey(patch.Target), out var bucket))
+					return Array.Empty<ILPatchStructuralCandidate>();
+
 				var source = new Fingerprint(patch.Target, patch.BaseBody);
-				var candidates = new List<ILPatchStructuralCandidate>();
+				var candidates = new List<ILPatchStructuralCandidate>(bucket.Count);
 
-				foreach (var method in methods) {
-					var identity = ILPatchMethodIdentity.Create(method);
-					if (!IsCoarseCandidate(source.Identity, identity))
-						continue;
-
-					var current = GetCandidateData(method, identity);
+				foreach (var header in bucket) {
+					var current = GetCandidateData(header);
 					double score = Score(source, current.Fingerprint, out string explanation);
-					candidates.Add(new ILPatchStructuralCandidate(method, current.Identity, score, current.BodyHash, explanation));
+					candidates.Add(new ILPatchStructuralCandidate(header.Method, current.Identity, score, current.BodyHash, explanation));
 				}
 
 				return candidates
@@ -95,13 +111,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 					.ToArray();
 			}
 
-			CandidateData GetCandidateData(MethodDef method, ILPatchMethodIdentity identity) {
-				if (cache.TryGetValue(method, out var data))
+			CandidateData GetCandidateData(CandidateHeader header) {
+				if (cache.TryGetValue(header.Method, out var data))
 					return data;
-				var body = CilNormalizer.CreateSnapshot(method);
+				var body = CilNormalizer.CreateSnapshot(header.Method);
 				body.CanonicalHash = ILPatchBodyHasher.Compute(body);
-				data = new CandidateData(identity, new Fingerprint(identity, body), body.CanonicalHash);
-				cache.Add(method, data);
+				data = new CandidateData(header.Identity, new Fingerprint(header.Identity, body), body.CanonicalHash);
+				cache.Add(header.Method, data);
 				return data;
 			}
 		}
@@ -170,18 +186,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 		}
 
-		static bool IsCoarseCandidate(ILPatchMethodIdentity source, ILPatchMethodIdentity candidate) {
-			// Cross-version patching normally stays inside the same managed module. Keep the first
-			// structural pass narrow enough to be useful even for very large Unity assemblies.
-			if (!StringComparer.Ordinal.Equals(source.AssemblyName, candidate.AssemblyName) ||
-				!StringComparer.Ordinal.Equals(source.ModuleName, candidate.ModuleName))
-				return false;
-			if (source.HasThis != candidate.HasThis || source.GenericArity != candidate.GenericArity)
-				return false;
-			if (source.ParameterTypes.Count != candidate.ParameterTypes.Count)
-				return false;
-			return true;
-		}
+		static string CreateCoarseKey(ILPatchMethodIdentity identity) =>
+			$"{identity.AssemblyName}\u001F{identity.ModuleName}\u001F{identity.HasThis}\u001F{identity.GenericArity}\u001F{identity.ParameterTypes.Count}";
 
 		static double Score(Fingerprint source, Fingerprint candidate, out string explanation) {
 			double weightedScore = 0;
