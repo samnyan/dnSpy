@@ -219,7 +219,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 			importGrid.Columns.Add(CreateTextColumn("Method", nameof(ImportRow.Method), 2.5));
 			importGrid.Columns.Add(CreateTextColumn("Current", nameof(ImportRow.CurrentHash), 1));
 			importGrid.Columns.Add(CreateTextColumn("Baseline", nameof(ImportRow.BaseHash), 1));
-			importGrid.Columns.Add(CreateTextColumn("Details", nameof(ImportRow.Details), 3));
+			importGrid.Columns.Add(CreateTextColumn("Top candidate", nameof(ImportRow.Candidate), 2));
+			importGrid.Columns.Add(CreateTextColumn("Score", nameof(ImportRow.Score), 0.7));
+			importGrid.Columns.Add(CreateTextColumn("Details", nameof(ImportRow.Details), 2.5));
 			importGrid.ItemsSource = imports;
 			importGrid.SelectionChanged += ImportGrid_SelectionChanged;
 			Grid.SetRow(importGrid, 3);
@@ -342,13 +344,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 			importedPreview = preview;
 			imports.Clear();
 			foreach (var result in preview.Results) {
+				var bestCandidate = result.StructuralCandidates.FirstOrDefault();
 				imports.Add(new ImportRow {
 					Result = result,
 					Status = result.Status.ToString(),
 					Method = result.Patch.Target?.ToString() ?? "<invalid patch entry>",
 					CurrentHash = ShortHash(result.CurrentBodyHash),
 					BaseHash = ShortHash(result.Patch.BaseBody?.CanonicalHash),
-					Details = result.Message,
+					Candidate = bestCandidate?.Identity.ToString() ?? "—",
+					Score = bestCandidate is null ? "—" : $"{bestCandidate.Score:P1}",
+					Details = BuildCandidateSummary(result),
 				});
 			}
 
@@ -472,11 +477,42 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var builder = new StringBuilder();
 			builder.AppendLine($"Import preview: {result.Status}");
 			builder.AppendLine(result.Message);
+			if (result.StructuralCandidates.Count != 0) {
+				builder.AppendLine();
+				builder.AppendLine("Structural candidates (advisory only; these do not authorize Apply Exact):");
+				for (int i = 0; i < result.StructuralCandidates.Count; i++) {
+					var candidate = result.StructuralCandidates[i];
+					builder.Append(i + 1).Append(". ")
+						.Append(candidate.Identity.ToString())
+						.Append("  ")
+						.Append(candidate.Score.ToString("P1"))
+						.Append("  [")
+						.Append(ShortHash(candidate.CurrentBodyHash))
+						.AppendLine("]");
+					builder.Append("   ").AppendLine(candidate.Explanation);
+				}
+			}
 			builder.AppendLine();
 			if (result.Patch.BaseBody is null || result.Patch.PatchedBody is null)
 				return builder.AppendLine("Patch entry does not contain complete method bodies.").ToString();
 			builder.Append(BuildInstructionDiff(result.Patch));
 			return builder.ToString();
+		}
+
+		static string BuildCandidateSummary(ILPatchImportResult result) {
+			var best = result.StructuralCandidates.FirstOrDefault();
+			if (best is null)
+				return result.Message;
+			string confidence;
+			var second = result.StructuralCandidates.Skip(1).FirstOrDefault();
+			double margin = second is null ? best.Score : best.Score - second.Score;
+			if (best.Score >= 0.85 && margin >= 0.08)
+				confidence = "strong structural lead";
+			else if (best.Score >= 0.70)
+				confidence = "possible structural lead";
+			else
+				confidence = "weak structural lead";
+			return $"{result.Message} Top candidate is a {confidence} ({best.Score:P1}, margin {margin:P1}).";
 		}
 
 		static string BuildInstructionDiff(ILPatchMethodChange change) {
@@ -550,6 +586,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 			public string Method { get; set; } = string.Empty;
 			public string CurrentHash { get; set; } = string.Empty;
 			public string BaseHash { get; set; } = string.Empty;
+			public string Candidate { get; set; } = string.Empty;
+			public string Score { get; set; } = string.Empty;
 			public string Details { get; set; } = string.Empty;
 		}
 
