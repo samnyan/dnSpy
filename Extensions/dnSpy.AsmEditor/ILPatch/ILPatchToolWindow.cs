@@ -370,13 +370,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 				});
 			}
 
-			int cleanRebase = preview.Results.Count(a => a.RebasePreview?.Status == ILPatchRebaseStatus.Clean);
-			int conflictRebase = preview.Results.Count(a => a.RebasePreview?.Status == ILPatchRebaseStatus.Conflict);
-			int unsupportedRebase = preview.Results.Count(a => a.RebasePreview?.Status == ILPatchRebaseStatus.Unsupported);
+			int cleanRebase = preview.Results.Count(a => a.Status == ILPatchImportStatus.BaseChanged && a.RebasePreview?.Status == ILPatchRebaseStatus.Clean);
+			int conflictRebase = preview.Results.Count(a => a.Status == ILPatchImportStatus.BaseChanged && a.RebasePreview?.Status == ILPatchRebaseStatus.Conflict);
+			int unsupportedRebase = preview.Results.Count(a => a.Status == ILPatchImportStatus.BaseChanged && a.RebasePreview?.Status == ILPatchRebaseStatus.Unsupported);
 			importSummaryText.Text =
 				$"{Path.GetFileName(filename)}: {preview.Results.Count} method(s) — " +
 				$"{preview.Count(ILPatchImportStatus.Exact)} exact, " +
-				$"{preview.Count(ILPatchImportStatus.AlreadyApplied)} already applied, " +
+				$"{preview.Count(ILPatchImportStatus.AlreadyApplied)} directly applied, " +
+				$"{preview.Count(ILPatchImportStatus.RebasedApplied)} rebased applied, " +
 				$"{preview.Count(ILPatchImportStatus.BaseChanged)} base changed " +
 				$"(rebase: {cleanRebase} clean / {conflictRebase} conflict / {unsupportedRebase} unsupported), " +
 				$"{preview.Count(ILPatchImportStatus.Missing)} missing, " +
@@ -579,7 +580,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 						builder.Append("current [").Append(hunk.NewStart).Append(", ").Append(hunk.NewStart + hunk.NewLength).Append(") ");
 					builder.Append(hunk.Status).Append(": ").AppendLine(hunk.Message);
 				}
-				builder.AppendLine("Rebase analysis is advisory only; Apply Exact will not apply BaseChanged methods.");
+				builder.AppendLine(rebase.Status == ILPatchRebaseStatus.Clean
+					? "This method is eligible for Apply Clean Rebase; Apply Exact will still ignore it."
+					: "This BaseChanged method is not eligible for automatic rebase application.");
 			}
 			if (result.StructuralCandidates.Count != 0) {
 				builder.AppendLine();
