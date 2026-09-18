@@ -140,6 +140,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			var current = CilNormalizer.CreateSnapshot(target);
 			current.CanonicalHash = ILPatchBodyHasher.Compute(current);
+			return Analyze(patch, target, current);
+		}
+
+		internal static ILPatchRebasePreview Analyze(ILPatchMethodChange patch, MethodDef target,
+			ILPatchMethodBodySnapshot current) {
+			if (patch is null)
+				throw new ArgumentNullException(nameof(patch));
+			if (target is null)
+				throw new ArgumentNullException(nameof(target));
+			if (current is null)
+				throw new ArgumentNullException(nameof(current));
+			if (patch.BaseBody is null || patch.PatchedBody is null)
+				return Unsupported(target, current.CanonicalHash, "Patch entry does not contain complete baseline and patched bodies.");
 
 			bool localsChanged = !patch.BaseBody.Locals.SequenceEqual(patch.PatchedBody.Locals, StringComparer.Ordinal);
 			bool handlersChanged = false;
