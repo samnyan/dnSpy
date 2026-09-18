@@ -121,7 +121,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 	}
 
 	sealed class ILPatchOperand {
-		public static readonly ILPatchOperand None = new ILPatchOperand();
+		// Never expose a shared mutable singleton here. Json.NET may populate an existing
+		// property instance during deserialization; sharing one None object across instructions
+		// makes a later operand overwrite every earlier instruction that referenced it.
+		public static ILPatchOperand None => new ILPatchOperand();
 
 		public ILPatchOperandKind Kind { get; set; }
 		public string? Text { get; set; }

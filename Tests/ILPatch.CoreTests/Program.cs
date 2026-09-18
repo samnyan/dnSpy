@@ -9,6 +9,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		static int Main() {
 			var tests = new (string Name, Action Run)[] {
 				(nameof(BodyHashIgnoresMaxStack), BodyHashIgnoresMaxStack),
+				(nameof(SerializerPreservesDistinctOperands), SerializerPreservesDistinctOperands),
 				(nameof(CleanRebasePreservesUpstreamInsertion), CleanRebasePreservesUpstreamInsertion),
 				(nameof(UpstreamEditInsidePatchRangeConflicts), UpstreamEditInsidePatchRangeConflicts),
 				(nameof(BranchIndexShiftDoesNotCreateFalsePatchHunks), BranchIndexShiftDoesNotCreateFalsePatchHunks),
@@ -53,6 +54,26 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			Equal(first.CanonicalHash, second.CanonicalHash,
 				"Portable body hash must not change when only MaxStack changes.");
+		}
+
+		static void SerializerPreservesDistinctOperands() {
+			var target = CreateTarget();
+			var change = Change(target,
+				Snapshot(target, Ldc(1), Op("ret")),
+				Snapshot(target, Ldc(2), Op("ret")));
+			var document = new ILPatchDocument { Name = "serializer-operands" };
+			document.Methods.Add(change);
+
+			var roundTrip = ILPatchSerializer.Deserialize(ILPatchSerializer.Serialize(document));
+			var instructions = roundTrip.Methods[0].PatchedBody.Instructions;
+			Equal(ILPatchOperandKind.Integer, instructions[0].Operand.Kind,
+				"Integer operand kind must survive JSON round-trip.");
+			Equal(2L, instructions[0].Operand.IntegerValue,
+				"Integer operand value must survive JSON round-trip.");
+			Equal(ILPatchOperandKind.None, instructions[1].Operand.Kind,
+				"A later operand-less instruction must not mutate the earlier operand instance.");
+			False(ReferenceEquals(instructions[0].Operand, instructions[1].Operand),
+				"Deserialized instruction operands must not share a mutable None singleton.");
 		}
 
 		static void CleanRebasePreservesUpstreamInsertion() {
