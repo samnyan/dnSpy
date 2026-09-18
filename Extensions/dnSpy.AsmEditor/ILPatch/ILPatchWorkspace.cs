@@ -90,6 +90,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					TimestampUtc = DateTime.UtcNow,
 					Description = description ?? string.Empty,
 					Method = current.Method,
+					SourceModule = tracked.Method.Module,
 					BeforeHash = tracked.Current.CanonicalHash,
 					AfterHash = current.CanonicalHash,
 				});
@@ -139,6 +140,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					TimestampUtc = DateTime.UtcNow,
 					Description = description ?? string.Empty,
 					Method = after.Method,
+					SourceModule = method.Module,
 					BeforeHash = before.CanonicalHash,
 					AfterHash = after.CanonicalHash,
 				});
@@ -193,6 +195,31 @@ namespace dnSpy.AsmEditor.ILPatch {
 			method = match?.Method;
 			baselineOptions = match?.BaselineOptions;
 			return method is not null && baselineOptions is not null;
+		}
+
+		public void RemoveModules(IEnumerable<ModuleDef> modules) {
+			if (modules is null)
+				throw new ArgumentNullException(nameof(modules));
+
+			var removedModules = new HashSet<ModuleDef>(modules);
+			if (removedModules.Count == 0)
+				return;
+
+			bool changed = false;
+			foreach (var method in trackedMethods.Keys
+				.Where(a => a.Module is not null && removedModules.Contains(a.Module))
+				.ToArray()) {
+				trackedMethods.Remove(method);
+				pendingMutations.Remove(method);
+				changed = true;
+			}
+
+			int removedHistory = history.RemoveAll(a =>
+				a.SourceModule is not null && removedModules.Contains(a.SourceModule));
+			changed |= removedHistory != 0;
+
+			if (changed)
+				Changed?.Invoke(this, EventArgs.Empty);
 		}
 
 		static ILPatchMethodBodySnapshot CreateWorkspaceSnapshot(MethodDef method) {

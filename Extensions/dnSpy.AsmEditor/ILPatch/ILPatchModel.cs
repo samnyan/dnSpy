@@ -180,6 +180,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public DateTime TimestampUtc { get; set; }
 		public string Description { get; set; } = string.Empty;
 		public ILPatchMethodIdentity Method { get; set; } = null!;
+		// Workspace-only provenance used to remove history when a dnSpy document closes.
+		// ILPatchEditRecord is not part of the serialized .ilpatch format.
+		public ModuleDef? SourceModule { get; set; }
 		public string BeforeHash { get; set; } = string.Empty;
 		public string AfterHash { get; set; } = string.Empty;
 	}

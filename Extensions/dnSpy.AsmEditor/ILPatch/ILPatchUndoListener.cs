@@ -19,7 +19,9 @@
 
 using System;
 using System.ComponentModel.Composition;
+using dnlib.DotNet;
 using dnSpy.AsmEditor.UndoRedo;
+using dnSpy.Contracts.Documents;
 using dnSpy.Contracts.Extension;
 
 namespace dnSpy.AsmEditor.ILPatch {
@@ -31,7 +33,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 	[ExportAutoLoaded]
 	sealed class ILPatchUndoListener : IAutoLoaded {
 		[ImportingConstructor]
-		ILPatchUndoListener(IUndoCommandService undoCommandService) => undoCommandService.OnEvent += UndoCommandService_OnEvent;
+		ILPatchUndoListener(IUndoCommandService undoCommandService, IDsDocumentService documentService) {
+			undoCommandService.OnEvent += UndoCommandService_OnEvent;
+			documentService.CollectionChanged += DocumentService_CollectionChanged;
+		}
 
 		void UndoCommandService_OnEvent(object? sender, UndoCommandServiceEventArgs e) {
 			switch (e.Type) {
@@ -39,6 +44,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 			case UndoCommandServiceEventType.Undo:
 			case UndoCommandServiceEventType.Redo:
 				ILPatchWorkspace.Instance.RefreshTrackedMethods(e.Type.ToString());
+				break;
+			}
+		}
+
+		void DocumentService_CollectionChanged(object? sender, NotifyDocumentCollectionChangedEventArgs e) {
+			switch (e.Type) {
+			case NotifyDocumentCollectionType.Remove:
+			case NotifyDocumentCollectionType.Clear:
+				ILPatchWorkspace.Instance.RemoveModules(e.Documents.GetModules<ModuleDef>());
 				break;
 			}
 		}

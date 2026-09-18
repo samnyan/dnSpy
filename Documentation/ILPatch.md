@@ -110,9 +110,9 @@ The current implementation captures a method's body before its first mutation:
 - compiler-based C# / VB edits identify the methods affected by the importer;
 - raw IL editing and Replace Body With Stub call `ILPatchWorkspace.EnsureTracked()` through `MethodBodyOptions.CopyTo()`.
 
-An auto-loaded undo listener observes Add / Undo / Redo events and refreshes only methods that are already tracked. Imported Exact patches are also applied as one `IUndoCommand`, so one Ctrl+Z reverts the whole imported batch.
+An auto-loaded workspace listener observes Add / Undo / Redo events and refreshes only methods that are already tracked. It also subscribes to `IDsDocumentService.CollectionChanged`; when a document is removed or the document list is cleared, tracking, pending mutations and edit-history rows belonging to those `ModuleDef` instances are removed automatically. Imported Exact patches are also applied as one `IUndoCommand`, so one Ctrl+Z reverts the whole imported batch.
 
-This keeps normal tracking O(number of edited methods), while preserving dnSpy's existing save flow and undo semantics.
+This keeps normal tracking O(number of edited methods), avoids retaining closed assemblies in the singleton workspace, and preserves dnSpy's existing save flow and undo semantics.
 
 ## Exact import safety
 
@@ -147,6 +147,7 @@ CI then builds the CLI, runs a real child-process integration flow (`input.dll +
 - [x] CIL normalizer and deterministic method-body hash.
 - [x] Workspace model with baseline/current separation and edit history.
 - [x] Hook method-affecting undo commands into the workspace.
+- [x] Remove tracked methods/history automatically when dnSpy documents close.
 - [x] Add core regression tests for normalization/hash stability and rebase behavior.
 
 ### Phase 2 - Patch Workspace UI
