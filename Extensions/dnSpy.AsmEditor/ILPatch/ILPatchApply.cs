@@ -21,6 +21,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using dnlib.DotNet.Emit;
+using dnSpy.AsmEditor.MethodBody;
 using dnSpy.AsmEditor.UndoRedo;
 using dnSpy.Contracts.Decompiler;
 using dnSpy.Contracts.Documents;
@@ -79,5 +80,44 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		public IEnumerable<object> ModifiedObjects => entries.Select(a => (object)a.MethodNode);
+	}
+
+	/// <summary>
+	/// Restores one tracked method to the exact dnSpy MethodBodyOptions snapshot captured before
+	/// its first ILPatch-observed edit. Undo restores the body that existed before the revert.
+	/// </summary>
+	sealed class RevertILPatchMethodCommand : IUndoCommand {
+		readonly IMethodAnnotations methodAnnotations;
+		readonly MethodNode methodNode;
+		readonly MethodBodyOptions baselineOptions;
+		readonly MethodBodyOptions previousOptions;
+		bool wasBodyModified;
+
+		public RevertILPatchMethodCommand(IMethodAnnotations methodAnnotations, MethodNode methodNode,
+			MethodBodyOptions baselineOptions) {
+			this.methodAnnotations = methodAnnotations ?? throw new ArgumentNullException(nameof(methodAnnotations));
+			this.methodNode = methodNode ?? throw new ArgumentNullException(nameof(methodNode));
+			this.baselineOptions = baselineOptions ?? throw new ArgumentNullException(nameof(baselineOptions));
+			previousOptions = new MethodBodyOptions(methodNode.MethodDef);
+		}
+
+		public string Description => "Revert IL patch method to baseline";
+
+		public void Execute() {
+			var method = methodNode.MethodDef;
+			wasBodyModified = methodAnnotations.IsBodyModified(method);
+			baselineOptions.CopyTo(method);
+			methodAnnotations.SetBodyModified(method, false);
+		}
+
+		public void Undo() {
+			var method = methodNode.MethodDef;
+			previousOptions.CopyTo(method);
+			methodAnnotations.SetBodyModified(method, wasBodyModified);
+		}
+
+		public IEnumerable<object> ModifiedObjects {
+			get { yield return methodNode; }
+		}
 	}
 }

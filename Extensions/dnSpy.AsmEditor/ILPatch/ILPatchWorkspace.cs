@@ -21,6 +21,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using dnlib.DotNet;
+using dnSpy.AsmEditor.MethodBody;
 
 namespace dnSpy.AsmEditor.ILPatch {
 	/// <summary>
@@ -34,11 +35,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 		sealed class TrackedMethod {
 			public MethodDef Method { get; }
 			public ILPatchMethodBodySnapshot Baseline { get; }
+			public MethodBodyOptions BaselineOptions { get; }
 			public ILPatchMethodBodySnapshot Current { get; set; }
 
-			public TrackedMethod(MethodDef method, ILPatchMethodBodySnapshot baseline) {
+			public TrackedMethod(MethodDef method, ILPatchMethodBodySnapshot baseline, MethodBodyOptions baselineOptions) {
 				Method = method;
 				Baseline = baseline;
+				BaselineOptions = baselineOptions;
 				Current = baseline;
 			}
 		}
@@ -65,7 +68,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return;
 
 			var baseline = CreateWorkspaceSnapshot(method);
-			trackedMethods.Add(method, new TrackedMethod(method, baseline));
+			var baselineOptions = new MethodBodyOptions(method);
+			trackedMethods.Add(method, new TrackedMethod(method, baseline, baselineOptions));
 		}
 
 		/// <summary>
@@ -166,6 +170,29 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var document = new ILPatchDocument { Name = name ?? string.Empty };
 			document.Methods.AddRange(GetEffectiveChanges());
 			return document;
+		}
+
+		public bool TryGetTrackedBaseline(ILPatchMethodIdentity identity, out MethodDef? method,
+			out MethodBodyOptions? baselineOptions) {
+			if (identity is null)
+				throw new ArgumentNullException(nameof(identity));
+
+			string key = identity.ToCanonicalString();
+			TrackedMethod? match = null;
+			foreach (var tracked in trackedMethods.Values) {
+				if (!StringComparer.Ordinal.Equals(tracked.Baseline.Method.ToCanonicalString(), key))
+					continue;
+				if (match is not null) {
+					method = null;
+					baselineOptions = null;
+					return false;
+				}
+				match = tracked;
+			}
+
+			method = match?.Method;
+			baselineOptions = match?.BaselineOptions;
+			return method is not null && baselineOptions is not null;
 		}
 
 		static ILPatchMethodBodySnapshot CreateWorkspaceSnapshot(MethodDef method) {

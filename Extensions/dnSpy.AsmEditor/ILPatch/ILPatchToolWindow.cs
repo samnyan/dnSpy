@@ -125,6 +125,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly ComboBox candidateSelector;
 		readonly Button useCandidateButton;
 		readonly Button clearCandidateButton;
+		readonly Button revertButton;
 		readonly Button importButton;
 		readonly Button applyButton;
 		readonly Button rebaseButton;
@@ -153,6 +154,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			var header = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 6) };
 			var actionButtons = new StackPanel { Orientation = Orientation.Horizontal };
+			revertButton = new Button {
+				Content = "Revert Selected",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+			};
+			revertButton.Click += RevertButton_Click;
+			actionButtons.Children.Add(revertButton);
+
 			importButton = new Button {
 				Content = "Import .ilpatch...",
 				Padding = new Thickness(8, 2, 8, 2),
@@ -384,7 +394,33 @@ namespace dnSpy.AsmEditor.ILPatch {
 				selectedRow = changes.FirstOrDefault(a => a.Change.Target.ToCanonicalString() == selectedTarget);
 			selectedRow ??= changes.FirstOrDefault();
 			ChangesGrid.SelectedItem = selectedRow;
+			revertButton.IsEnabled = selectedRow is not null;
 			UpdateDiff(selectedRow);
+		}
+
+		void RevertButton_Click(object sender, RoutedEventArgs e) {
+			var row = ChangesGrid.SelectedItem as ChangeRow;
+			if (row is null)
+				return;
+
+			try {
+				if (!ILPatchWorkspace.Instance.TryGetTrackedBaseline(row.Change.Target,
+					out var method, out var baselineOptions) || method is null || baselineOptions is null) {
+					MsgBox.Instance.Show($"Could not uniquely resolve the tracked baseline for '{row.Change.Target}'.");
+					return;
+				}
+
+				var methodNode = appService.DocumentTreeView.FindNode(method) as MethodNode;
+				if (methodNode is null) {
+					MsgBox.Instance.Show($"Could not find the dnSpy document tree node for '{row.Change.Target}'.");
+					return;
+				}
+
+				undoCommandService.Add(new RevertILPatchMethodCommand(methodAnnotations, methodNode, baselineOptions));
+			}
+			catch (Exception ex) {
+				MsgBox.Instance.Show(ex, "Could not revert the selected IL patch change.");
+			}
 		}
 
 		void ImportButton_Click(object sender, RoutedEventArgs e) {
@@ -664,6 +700,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		void ChangesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) {
 			var row = ChangesGrid.SelectedItem as ChangeRow;
+			revertButton.IsEnabled = row is not null;
 			if (row is null)
 				return;
 			importGrid.SelectedItem = null;

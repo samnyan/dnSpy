@@ -152,8 +152,10 @@ Before the Windows build matrix starts, a lightweight `ILPatch.CoreTests` consol
 - [x] Tool window listing modified methods.
 - [x] Per-method edit history.
 - [x] Effective normalized IL diff.
-- [ ] Revert selected method to baseline.
+- [x] Revert selected method to baseline through dnSpy undo/redo.
 - [x] Export all effective changes.
+
+**Revert Selected** restores the MethodBodyOptions snapshot captured immediately before the method's first tracked edit. The revert itself is one dnSpy undo command, so Ctrl+Z restores the edited body. Returning to the baseline removes that method from the effective patch list while retaining edit history.
 
 The first UI can show normalized IL. A decompiled C# diff can be added as a convenience view later; it must not become the authoritative patch representation because decompiler output is not stable enough for matching.
 
