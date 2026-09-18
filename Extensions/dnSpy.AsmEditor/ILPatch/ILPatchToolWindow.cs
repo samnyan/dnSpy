@@ -30,9 +30,12 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using dnlib.DotNet;
+using dnSpy.AsmEditor.UndoRedo;
 using dnSpy.Contracts.App;
 using dnSpy.Contracts.Controls;
+using dnSpy.Contracts.Decompiler;
 using dnSpy.Contracts.Documents;
+using dnSpy.Contracts.Documents.TreeView;
 using dnSpy.Contracts.Extension;
 using dnSpy.Contracts.Menus;
 using dnSpy.Contracts.MVVM;
@@ -62,11 +65,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 	[Export(typeof(IToolWindowContentProvider))]
 	sealed class ILPatchToolWindowContentProvider : IToolWindowContentProvider {
 		readonly IDsDocumentService documentService;
+		readonly IUndoCommandService undoCommandService;
+		readonly IMethodAnnotations methodAnnotations;
+		readonly IAppService appService;
 		ILPatchToolWindowContent? content;
 
 		[ImportingConstructor]
-		ILPatchToolWindowContentProvider(IDsDocumentService documentService) =>
+		ILPatchToolWindowContentProvider(IDsDocumentService documentService, IUndoCommandService undoCommandService,
+			IMethodAnnotations methodAnnotations, IAppService appService) {
 			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
+			this.undoCommandService = undoCommandService ?? throw new ArgumentNullException(nameof(undoCommandService));
+			this.methodAnnotations = methodAnnotations ?? throw new ArgumentNullException(nameof(methodAnnotations));
+			this.appService = appService ?? throw new ArgumentNullException(nameof(appService));
+		}
 
 		public IEnumerable<ToolWindowContentInfo> ContentInfos {
 			get { yield return new ToolWindowContentInfo(ILPatchToolWindowContent.THE_GUID, ILPatchToolWindowContent.DEFAULT_LOCATION, 0, false); }
@@ -75,7 +86,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public ToolWindowContent? GetOrCreate(Guid guid) {
 			if (guid != ILPatchToolWindowContent.THE_GUID)
 				return null;
-			return content ??= new ILPatchToolWindowContent(documentService);
+			return content ??= new ILPatchToolWindowContent(documentService, undoCommandService, methodAnnotations, appService);
 		}
 	}
 
@@ -85,8 +96,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		readonly ILPatchWorkspaceControl control;
 
-		public ILPatchToolWindowContent(IDsDocumentService documentService) =>
-			control = new ILPatchWorkspaceControl(documentService);
+		public ILPatchToolWindowContent(IDsDocumentService documentService, IUndoCommandService undoCommandService,
+			IMethodAnnotations methodAnnotations, IAppService appService) =>
+			control = new ILPatchWorkspaceControl(documentService, undoCommandService, methodAnnotations, appService);
 
 		public override Guid Guid => THE_GUID;
 		public override string Title => "IL Patch Workspace";
@@ -97,6 +109,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 	sealed class ILPatchWorkspaceControl : UserControl {
 		readonly IDsDocumentService documentService;
+		readonly IUndoCommandService undoCommandService;
+		readonly IMethodAnnotations methodAnnotations;
+		readonly IAppService appService;
 		readonly ObservableCollection<ChangeRow> changes = new ObservableCollection<ChangeRow>();
 		readonly ObservableCollection<ImportRow> imports = new ObservableCollection<ImportRow>();
 		readonly ObservableCollection<HistoryRow> history = new ObservableCollection<HistoryRow>();
@@ -105,12 +120,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly TextBox diffText;
 		readonly DataGrid importGrid;
 		readonly Button importButton;
+		readonly Button applyButton;
 		readonly Button exportButton;
+		ILPatchImportPreview? importedPreview;
+		string? importedFilename;
 
 		public DataGrid ChangesGrid { get; }
 
-		public ILPatchWorkspaceControl(IDsDocumentService documentService) {
+		public ILPatchWorkspaceControl(IDsDocumentService documentService, IUndoCommandService undoCommandService,
+			IMethodAnnotations methodAnnotations, IAppService appService) {
 			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
+			this.undoCommandService = undoCommandService ?? throw new ArgumentNullException(nameof(undoCommandService));
+			this.methodAnnotations = methodAnnotations ?? throw new ArgumentNullException(nameof(methodAnnotations));
+			this.appService = appService ?? throw new ArgumentNullException(nameof(appService));
 
 			var root = new Grid { Margin = new Thickness(8) };
 			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -129,6 +151,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 			importButton.Click += ImportButton_Click;
 			actionButtons.Children.Add(importButton);
+
+			applyButton = new Button {
+				Content = "Apply Exact",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+			};
+			applyButton.Click += ApplyButton_Click;
+			actionButtons.Children.Add(applyButton);
 
 			exportButton = new Button {
 				Content = "Export .ilpatch...",
@@ -235,10 +266,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		void Workspace_Changed(object? sender, EventArgs e) {
 			if (!Dispatcher.CheckAccess()) {
-				Dispatcher.BeginInvoke(new Action(Refresh));
+				Dispatcher.BeginInvoke(new Action(RefreshWorkspaceAndImport));
 				return;
 			}
+			RefreshWorkspaceAndImport();
+		}
+
+		void RefreshWorkspaceAndImport() {
 			Refresh();
+			RefreshImportedPreview();
 		}
 
 		void Refresh() {
@@ -302,6 +338,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		void ShowImportPreview(string filename, ILPatchImportPreview preview) {
+			importedFilename = filename;
+			importedPreview = preview;
 			imports.Clear();
 			foreach (var result in preview.Results) {
 				imports.Add(new ImportRow {
@@ -317,10 +355,69 @@ namespace dnSpy.AsmEditor.ILPatch {
 			importSummaryText.Text =
 				$"{Path.GetFileName(filename)}: {preview.Results.Count} method(s) — " +
 				$"{preview.Count(ILPatchImportStatus.Exact)} exact, " +
+				$"{preview.Count(ILPatchImportStatus.AlreadyApplied)} already applied, " +
 				$"{preview.Count(ILPatchImportStatus.BaseChanged)} base changed, " +
 				$"{preview.Count(ILPatchImportStatus.Missing)} missing, " +
 				$"{preview.Count(ILPatchImportStatus.Ambiguous)} ambiguous.";
+			applyButton.IsEnabled = preview.Count(ILPatchImportStatus.Exact) != 0;
 			importGrid.SelectedItem = imports.FirstOrDefault();
+		}
+
+		void RefreshImportedPreview() {
+			if (importedPreview is null || importedFilename is null)
+				return;
+			var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
+			var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules);
+			ShowImportPreview(importedFilename, preview);
+		}
+
+		void ApplyButton_Click(object sender, RoutedEventArgs e) {
+			if (importedPreview is null || importedFilename is null)
+				return;
+
+			try {
+				// Revalidate immediately before mutation so a stale preview can never authorize an apply.
+				var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
+				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules);
+				ShowImportPreview(importedFilename, preview);
+
+				var exactResults = preview.Results.Where(a => a.Status == ILPatchImportStatus.Exact).ToArray();
+				if (exactResults.Length == 0)
+					return;
+
+				var materializers = new Dictionary<ModuleDef, ILPatchBodyMaterializer>();
+				var seenTargets = new HashSet<MethodDef>();
+				var entries = new List<ApplyILPatchCommand.Entry>(exactResults.Length);
+
+				foreach (var result in exactResults) {
+					var target = result.Target;
+					if (target is null || target.Module is null)
+						throw new InvalidOperationException($"Exact patch target '{result.Patch.Target}' is no longer available.");
+					if (!seenTargets.Add(target))
+						throw new InvalidOperationException($"The imported patch contains multiple Exact entries for '{result.Patch.Target}'. Nothing was applied.");
+
+					var methodNode = appService.DocumentTreeView.FindNode(target) as MethodNode;
+					if (methodNode is null)
+						throw new InvalidOperationException($"Could not find the dnSpy document tree node for '{result.Patch.Target}'.");
+
+					if (!materializers.TryGetValue(target.Module, out var materializer))
+						materializers.Add(target.Module, materializer = new ILPatchBodyMaterializer(target.Module));
+
+					if (!materializer.TryCreate(target, result.Patch.PatchedBody, out var newBody, out string error) || newBody is null) {
+						MsgBox.Instance.Show($"Cannot apply '{result.Patch.Target}'.\n\n{error}\n\nNo methods were modified.");
+						return;
+					}
+
+					entries.Add(new ApplyILPatchCommand.Entry(methodNode, newBody));
+				}
+
+				// One undo command makes this batch atomic from the user's point of view.
+				undoCommandService.Add(new ApplyILPatchCommand(methodAnnotations, entries, preview.Document.Name));
+				RefreshImportedPreview();
+			}
+			catch (Exception ex) {
+				MsgBox.Instance.Show(ex, "Could not apply the imported IL patch. No further methods were modified.");
+			}
 		}
 
 		void ExportButton_Click(object sender, RoutedEventArgs e) {
