@@ -137,6 +137,8 @@ The fork's GitHub Actions workflow is enabled and feature-branch pushes validate
 
 Before the Windows build matrix starts, a lightweight `ILPatch.CoreTests` console project runs regression tests directly against the linked core source files. This keeps rebase/matching regressions independent from the WPF/MEF application startup path.
 
+CI then builds the CLI, runs a real child-process integration flow (`input.dll + .ilpatch -> ilpatch apply -> output.dll -> reload/verify`), and publishes both a framework-dependent Windows x64 package and a portable `dotnet ilpatch.dll` package as short-lived workflow artifacts.
+
 ## Planned milestones
 
 ### Phase 1 - tracking foundation
@@ -212,7 +214,9 @@ The CLI currently accepts already-resolved patch definitions. Structural candida
 - [x] Add a pure headless apply engine shared by automation code.
 - [x] Add `Tools/ILPatch.Cli` with sequential multi-patch and `--dry-run` support.
 - [x] Add headless Exact / Clean-Rebase / fail-closed regression tests.
-- [ ] Package the CLI in release artifacts.
+- [x] Add a real CLI child-process / on-disk assembly integration test.
+- [x] Publish portable and Windows x64 CLI packages as CI artifacts.
+- [ ] Attach CLI packages to GitHub releases.
 - [ ] Add optional machine-readable JSON report output.
 - [ ] Add explicit partial-apply mode only if a real workflow needs it.
 

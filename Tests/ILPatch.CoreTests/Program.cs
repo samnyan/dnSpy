@@ -6,7 +6,10 @@ using dnlib.DotNet;
 
 namespace dnSpy.AsmEditor.ILPatch {
 	static class Program {
-		static int Main() {
+		static int Main(string[] args) {
+			if (args.Length != 0)
+				return RunUtility(args);
+
 			var tests = new (string Name, Action Run)[] {
 				(nameof(BodyHashIgnoresMaxStack), BodyHashIgnoresMaxStack),
 				(nameof(SerializerPreservesDistinctOperands), SerializerPreservesDistinctOperands),
@@ -40,6 +43,57 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			Console.WriteLine($"{tests.Length - failed}/{tests.Length} ILPatch core tests passed.");
 			return failed == 0 ? 0 : 1;
+		}
+
+		static int RunUtility(string[] args) {
+			try {
+				if (args.Length == 2 && StringComparer.Ordinal.Equals(args[0], "create-cli-fixture")) {
+					CreateCliFixture(args[1]);
+					return 0;
+				}
+				if (args.Length == 2 && StringComparer.Ordinal.Equals(args[0], "verify-cli-output")) {
+					VerifyCliOutput(args[1]);
+					return 0;
+				}
+				Console.Error.WriteLine("Unknown ILPatch.CoreTests utility command.");
+				return 2;
+			}
+			catch (Exception ex) {
+				Console.Error.WriteLine(ex);
+				return 1;
+			}
+		}
+
+		static void CreateCliFixture(string directory) {
+			directory = Path.GetFullPath(directory);
+			Directory.CreateDirectory(directory);
+
+			string inputPath = Path.Combine(directory, "input.dll");
+			string patchPath = Path.Combine(directory, "change.ilpatch");
+
+			var patchSource = CreateNamedIntMethod("Run", 1);
+			var patch = CreateRealBodyConstantPatch(patchSource, 2);
+			var document = new ILPatchDocument { Name = "cli-process-integration" };
+			document.Methods.Add(patch);
+			ILPatchSerializer.Save(patchPath, document);
+
+			var inputMethod = CreateNamedIntMethod("Run", 1);
+			inputMethod.Module.Write(inputPath);
+
+			Console.WriteLine(inputPath);
+			Console.WriteLine(patchPath);
+		}
+
+		static void VerifyCliOutput(string outputPath) {
+			outputPath = Path.GetFullPath(outputPath);
+			using var module = ModuleDefMD.Load(outputPath);
+			var method = module.GetTypes()
+				.SelectMany(a => a.Methods)
+				.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Run"));
+			var snapshot = CilNormalizer.CreateSnapshot(method);
+			Equal(2L, snapshot.Instructions[0].Operand.IntegerValue,
+				"CLI process output assembly must contain the patched IL.");
+			Console.WriteLine("CLI process output verified.");
 		}
 
 		static void BodyHashIgnoresMaxStack() {

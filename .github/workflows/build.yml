@@ -47,6 +47,38 @@ jobs:
       - name: Smoke test ILPatch CLI
         run: dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- --help
 
+      - name: Test ILPatch CLI process round trip
+        run: |
+          fixture="$RUNNER_TEMP/ilpatch-cli-integration"
+          mkdir -p "$fixture"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- create-cli-fixture "$fixture"
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- apply "$fixture/input.dll" "$fixture/change.ilpatch" -o "$fixture/output.dll"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- verify-cli-output "$fixture/output.dll"
+
+      - name: Publish portable ILPatch CLI
+        run: dotnet publish Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release -p:UseAppHost=false -o "$RUNNER_TEMP/ilpatch-portable"
+
+      - name: Publish Windows x64 ILPatch CLI
+        run: dotnet publish Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release -r win-x64 --self-contained false -o "$RUNNER_TEMP/ilpatch-win-x64"
+
+      - name: Upload portable ILPatch CLI
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ilpatch-portable
+          path: ${{ runner.temp }}/ilpatch-portable
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 7
+
+      - name: Upload Windows x64 ILPatch CLI
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ilpatch-win-x64
+          path: ${{ runner.temp }}/ilpatch-win-x64
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 7
+
   build:
     # Feature branches in this repository are already covered by the push trigger.
     # Keep pull_request builds for PRs coming from external forks without running
