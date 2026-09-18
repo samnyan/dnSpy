@@ -133,9 +133,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		static void ManualOverrideCanRetargetRenamedMethod() {
 			var oldTarget = CreateNamedIntMethod("OldName", 1);
 			var newTarget = CreateNamedIntMethod("NewName", 1);
-			var patch = Change(oldTarget,
-				Snapshot(oldTarget, Ldc(1), Op("ret")),
-				Snapshot(oldTarget, Ldc(2), Op("ret")));
+			var patch = CreateRealBodyConstantPatch(oldTarget, 2);
 			var document = new ILPatchDocument();
 			document.Methods.Add(patch);
 
@@ -165,9 +163,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			incompatible.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
 			type.Methods.Add(incompatible);
 
-			var patch = Change(oldTarget,
-				Snapshot(oldTarget, Ldc(1), Op("ret")),
-				Snapshot(oldTarget, Ldc(2), Op("ret")));
+			var patch = CreateRealBodyConstantPatch(oldTarget, 2);
 			var document = new ILPatchDocument();
 			document.Methods.Add(patch);
 			var overrides = new Dictionary<string, ILPatchMethodIdentity>(StringComparer.Ordinal) {
@@ -178,6 +174,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Equal(ILPatchImportStatus.Incompatible, preview.Results[0].Status,
 				"A manual target with a different parameter signature must be rejected before apply/rebase.");
 			True(preview.Results[0].IsManualTarget, "Rejected override should still be marked as manual.");
+		}
+
+		static ILPatchMethodChange CreateRealBodyConstantPatch(MethodDef target, int patchedValue) {
+			var baseline = CilNormalizer.CreateSnapshot(target);
+			baseline.CanonicalHash = ILPatchBodyHasher.Compute(baseline);
+
+			target.Body!.Instructions[0] = dnlib.DotNet.Emit.Instruction.CreateLdcI4(patchedValue);
+			var patched = CilNormalizer.CreateSnapshot(target);
+			patched.CanonicalHash = ILPatchBodyHasher.Compute(patched);
+
+			return Change(target, baseline, patched);
 		}
 
 		static ModuleDef CreateModule() {
