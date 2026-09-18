@@ -25,6 +25,7 @@ using dnlib.DotNet;
 using dnlib.DotNet.Emit;
 using dnSpy.AsmEditor.UndoRedo;
 using dnSpy.Contracts.Decompiler;
+using dnSpy.Contracts.Documents;
 using dnSpy.Contracts.Documents.TreeView;
 
 namespace dnSpy.AsmEditor.ILPatch {
