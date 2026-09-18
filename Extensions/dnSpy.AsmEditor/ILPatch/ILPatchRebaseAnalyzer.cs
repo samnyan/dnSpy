@@ -130,8 +130,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			current.CanonicalHash = ILPatchBodyHasher.Compute(current);
 
 			bool localsChanged = !patch.BaseBody.Locals.SequenceEqual(patch.PatchedBody.Locals, StringComparer.Ordinal);
-			bool handlersChanged = !patch.BaseBody.ExceptionHandlers.Select(a => a.ToCanonicalString())
-				.SequenceEqual(patch.PatchedBody.ExceptionHandlers.Select(a => a.ToCanonicalString()), StringComparer.Ordinal);
+			bool handlersChanged = false;
 			bool initLocalsChanged = patch.BaseBody.InitLocals != patch.PatchedBody.InitLocals;
 
 			// First align base -> patched using branch-insensitive keys. A simple insertion can
@@ -143,6 +142,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return Unsupported(target, current.CanonicalHash, error, localsChanged, handlersChanged, initLocalsChanged);
 
 			var baseToPatched = CreateIndexMap(patch.BaseBody.Instructions.Count, relaxedPatchMatches);
+			handlersChanged = !ExceptionHandlersEquivalentAfterMapping(
+				patch.BaseBody.ExceptionHandlers,
+				patch.PatchedBody.ExceptionHandlers,
+				baseToPatched);
 			var patchMatches = relaxedPatchMatches
 				.Where(pair => InstructionMatchesMappedBaseline(
 					patch.BaseBody.Instructions[pair.Left],
@@ -259,6 +262,35 @@ namespace dnSpy.AsmEditor.ILPatch {
 		static ILPatchRebaseHunk Conflict(DiffHunk hunk, string message) =>
 			new ILPatchRebaseHunk(hunk.BaseStart, hunk.BaseLength, hunk.PatchedStart, hunk.PatchedLength,
 				-1, 0, ILPatchRebaseHunkStatus.Conflict, message);
+
+		static bool ExceptionHandlersEquivalentAfterMapping(
+			IReadOnlyList<ILPatchExceptionHandler> baseline,
+			IReadOnlyList<ILPatchExceptionHandler> patched,
+			int?[] baseToPatched) {
+			if (baseline.Count != patched.Count)
+				return false;
+
+			for (int i = 0; i < baseline.Count; i++) {
+				var left = baseline[i];
+				var right = patched[i];
+				if (!StringComparer.Ordinal.Equals(left.HandlerType, right.HandlerType) ||
+					!StringComparer.Ordinal.Equals(left.CatchType, right.CatchType))
+					return false;
+				if (!BoundaryMatches(left.TryStart, right.TryStart, baseToPatched) ||
+					!BoundaryMatches(left.TryEnd, right.TryEnd, baseToPatched) ||
+					!BoundaryMatches(left.HandlerStart, right.HandlerStart, baseToPatched) ||
+					!BoundaryMatches(left.HandlerEnd, right.HandlerEnd, baseToPatched) ||
+					!BoundaryMatches(left.FilterStart, right.FilterStart, baseToPatched))
+					return false;
+			}
+			return true;
+		}
+
+		static bool BoundaryMatches(int baselineIndex, int patchedIndex, int?[] baseToPatched) {
+			if (baselineIndex < 0 || patchedIndex < 0)
+				return baselineIndex == patchedIndex;
+			return TryMapIndex(baselineIndex, baseToPatched, out int mapped) && mapped == patchedIndex;
+		}
 
 		static bool InstructionMatchesMappedBaseline(ILPatchInstruction baseline, ILPatchInstruction current, int?[] baseToNew) {
 			if (!StringComparer.Ordinal.Equals(baseline.OpCode, current.OpCode))
