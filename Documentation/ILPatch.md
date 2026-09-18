@@ -183,13 +183,36 @@ Manual candidate selection is session-local until the user explicitly exports an
 
 ### Phase 5 - headless application
 
-Move format/normalization/matching/apply code into a reusable core library and add a CLI using the same engine:
+The headless path uses the same normalized CIL matcher, three-way rebase logic and dnlib body materializer as the GUI.
 
 ```powershell
-ilpatch apply Assembly-CSharp.dll patches/*.ilpatch -o Assembly-CSharp.patched.dll
+# Apply one or more patches in order.
+ilpatch apply Assembly-CSharp.dll patches/001.ilpatch patches/002.ilpatch -o Assembly-CSharp.patched.dll
+
+# Perform the complete matching/rebase/materialization pass without writing a DLL.
+ilpatch apply --dry-run Assembly-CSharp.dll patches/001.ilpatch patches/002.ilpatch
 ```
 
-The CLI should fail without writing output when any patch conflicts unless an explicit partial-apply option is supplied.
+The MVP is deliberately fail-closed:
+
+- `Exact` -> apply;
+- `AlreadyApplied` / `RebasedApplied` -> report present and continue;
+- `BaseChanged + Clean` -> three-way rebase and apply;
+- `Missing`, `Ambiguous`, `Incompatible`, rebase conflict or unsupported materialization -> fail the command;
+- a failed command never writes the output assembly;
+- the source DLL is never overwritten in place.
+
+Exit codes are `0` for success, `1` for usage/I/O/unexpected failures and `2` for unresolved patch entries.
+
+The CLI currently accepts already-resolved patch definitions. Structural candidates are printed for diagnosis but never auto-selected; use the dnSpy Patch Workspace to confirm a manual candidate and **Export Rebased .ilpatch...** before headless deployment.
+
+- [x] Extract method-body materialization into pure dnlib core code.
+- [x] Add a pure headless apply engine shared by automation code.
+- [x] Add `Tools/ILPatch.Cli` with sequential multi-patch and `--dry-run` support.
+- [x] Add headless Exact / Clean-Rebase / fail-closed regression tests.
+- [ ] Package the CLI in release artifacts.
+- [ ] Add optional machine-readable JSON report output.
+- [ ] Add explicit partial-apply mode only if a real workflow needs it.
 
 ## Non-goals for the first version
 

@@ -16,6 +16,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(ManualOverrideRejectsSignatureChange), ManualOverrideRejectsSignatureChange),
 				(nameof(UpdatedDefinitionPersistsManualRenamedTarget), UpdatedDefinitionPersistsManualRenamedTarget),
 				(nameof(UpdatedDefinitionRebasesCleanUpstreamChange), UpdatedDefinitionRebasesCleanUpstreamChange),
+				(nameof(HeadlessApplyExactMutatesTarget), HeadlessApplyExactMutatesTarget),
+				(nameof(HeadlessApplyCleanRebasePreservesUpstream), HeadlessApplyCleanRebasePreservesUpstream),
+				(nameof(HeadlessConflictDoesNotMutateTarget), HeadlessConflictDoesNotMutateTarget),
 			};
 
 			int failed = 0;
@@ -225,6 +228,63 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Equal("nop", updated.PatchedBody.Instructions[0].OpCode, "Rebased patch must preserve upstream nop.");
 			Equal(2L, updated.PatchedBody.Instructions[1].Operand.IntegerValue,
 				"Rebased patch must apply the original constant edit on top of upstream IL.");
+		}
+
+		static void HeadlessApplyExactMutatesTarget() {
+			var oldTarget = CreateNamedIntMethod("Run", 1);
+			var patch = CreateRealBodyConstantPatch(oldTarget, 2);
+			var current = CreateNamedIntMethod("Run", 1);
+			var document = new ILPatchDocument();
+			document.Methods.Add(patch);
+
+			var report = ILPatchHeadlessApplier.Apply(current.Module, document);
+			True(report.Success, "Exact headless patch should succeed.");
+			Equal(1, report.AppliedCount, "Exactly one method should be applied.");
+			Equal(ILPatchHeadlessAction.AppliedExact, report.Entries[0].Action,
+				"Exact patch should report AppliedExact.");
+			var snapshot = CilNormalizer.CreateSnapshot(current);
+			Equal(2L, snapshot.Instructions[0].Operand.IntegerValue,
+				"Headless exact apply should replace the constant.");
+		}
+
+		static void HeadlessApplyCleanRebasePreservesUpstream() {
+			var oldTarget = CreateNamedIntMethod("Run", 1);
+			var patch = CreateRealBodyConstantPatch(oldTarget, 2);
+			var current = CreateNamedIntMethod("Run", 1);
+			current.Body!.Instructions.Insert(0,
+				new dnlib.DotNet.Emit.Instruction(dnlib.DotNet.Emit.OpCodes.Nop));
+			var document = new ILPatchDocument();
+			document.Methods.Add(patch);
+
+			var report = ILPatchHeadlessApplier.Apply(current.Module, document);
+			True(report.Success, "Independent upstream insertion should headlessly rebase.");
+			Equal(ILPatchHeadlessAction.AppliedCleanRebase, report.Entries[0].Action,
+				"Headless action should report a clean rebase.");
+			var snapshot = CilNormalizer.CreateSnapshot(current);
+			Equal(3, snapshot.Instructions.Count, "Upstream insertion must remain.");
+			Equal("nop", snapshot.Instructions[0].OpCode, "Upstream nop must remain.");
+			Equal(2L, snapshot.Instructions[1].Operand.IntegerValue,
+				"Original patch edit must be applied after the upstream nop.");
+		}
+
+		static void HeadlessConflictDoesNotMutateTarget() {
+			var oldTarget = CreateNamedIntMethod("Run", 1);
+			var patch = CreateRealBodyConstantPatch(oldTarget, 2);
+			var current = CreateNamedIntMethod("Run", 3);
+			var before = CilNormalizer.CreateSnapshot(current);
+			before.CanonicalHash = ILPatchBodyHasher.Compute(before);
+			var document = new ILPatchDocument();
+			document.Methods.Add(patch);
+
+			var report = ILPatchHeadlessApplier.Apply(current.Module, document);
+			False(report.Success, "Conflicting upstream edit must fail closed.");
+			Equal(0, report.AppliedCount, "Failure must not report applied methods.");
+			Equal(ILPatchHeadlessAction.Unresolved, report.Entries[0].Action,
+				"Conflict must be reported as unresolved.");
+			var after = CilNormalizer.CreateSnapshot(current);
+			after.CanonicalHash = ILPatchBodyHasher.Compute(after);
+			Equal(before.CanonicalHash, after.CanonicalHash,
+				"Failed headless preflight must not mutate the target MethodDef.");
 		}
 
 		static ILPatchMethodChange CreateRealBodyConstantPatch(MethodDef target, int patchedValue) {
