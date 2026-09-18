@@ -131,6 +131,10 @@ Normalized metadata references must be rebound to real dnlib objects before writ
 
 `BaseChanged` is not auto-applied. Structural matching and three-way rebasing are Phase 4 work.
 
+## CI
+
+The fork's GitHub Actions workflow is enabled and feature-branch pushes are used to validate this implementation on Windows across all supported build targets.
+
 ## Planned milestones
 
 ### Phase 1 - tracking foundation
