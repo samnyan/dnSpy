@@ -21,11 +21,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ilpatch-tests:
+    # Local feature PRs are already tested by the matching push run.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    name: ILPatch core tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6.0.0
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: ga
+
+      - name: Run ILPatch core tests
+        run: dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release
+
   build:
     # Feature branches in this repository are already covered by the push trigger.
     # Keep pull_request builds for PRs coming from external forks without running
     # the same matrix twice for our own feature/** branches.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    needs: ilpatch-tests
     name: Build (${{ matrix.platform }})
     runs-on: windows-latest
     timeout-minutes: 45
