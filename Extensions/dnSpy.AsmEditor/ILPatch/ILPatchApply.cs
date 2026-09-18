@@ -91,7 +91,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					error = $"Instruction #{i} uses unknown opcode '{source.OpCode}'.";
 					return false;
 				}
-				result.Instructions.Add(Instruction.Create(opCode));
+				result.Instructions.Add(new Instruction(opCode));
 			}
 
 			for (int i = 0; i < snapshot.Instructions.Count; i++) {
@@ -319,7 +319,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 				typeSig = target.ReturnType;
 				return true;
 			}
-			return typeSigs.TryGetValue(fullName ?? string.Empty, out typeSig!);
+			if (typeSigs.TryGetValue(fullName ?? string.Empty, out var resolved)) {
+				typeSig = resolved;
+				return true;
+			}
+			typeSig = null!;
+			return false;
 		}
 
 		void IndexModule() {
