@@ -39,10 +39,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public string Message { get; }
 		public string? CurrentBodyHash { get; }
 		public IReadOnlyList<ILPatchStructuralCandidate> StructuralCandidates { get; }
+		public ILPatchRebasePreview? RebasePreview { get; }
 
 		public ILPatchImportResult(ILPatchMethodChange patch, ILPatchImportStatus status, MethodDef? target,
 			IReadOnlyList<MethodDef> candidates, string message, string? currentBodyHash = null,
-			IReadOnlyList<ILPatchStructuralCandidate>? structuralCandidates = null) {
+			IReadOnlyList<ILPatchStructuralCandidate>? structuralCandidates = null,
+			ILPatchRebasePreview? rebasePreview = null) {
 			Patch = patch ?? throw new ArgumentNullException(nameof(patch));
 			Status = status;
 			Target = target;
@@ -50,6 +52,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Message = message ?? string.Empty;
 			CurrentBodyHash = currentBodyHash;
 			StructuralCandidates = structuralCandidates ?? Array.Empty<ILPatchStructuralCandidate>();
+			RebasePreview = rebasePreview;
 		}
 	}
 
@@ -134,9 +137,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var target = candidates[0];
 			if (target.Body is null) {
 				var structuralCandidates = structuralCatalog.FindCandidates(patch);
+				var rebasePreview = ILPatchRebaseAnalyzer.Analyze(patch, target);
 				return new ILPatchImportResult(patch, ILPatchImportStatus.BaseChanged, target, candidates.ToArray(),
 					"The exact target method exists but no longer has a CIL body.",
-					structuralCandidates: structuralCandidates);
+					structuralCandidates: structuralCandidates, rebasePreview: rebasePreview);
 			}
 
 			var snapshot = CilNormalizer.CreateSnapshot(target);
@@ -149,9 +153,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			if (!StringComparer.Ordinal.Equals(snapshot.CanonicalHash, patch.BaseBody.CanonicalHash)) {
 				var structuralCandidates = structuralCatalog.FindCandidates(patch);
+				var rebasePreview = ILPatchRebaseAnalyzer.Analyze(patch, target);
 				return new ILPatchImportResult(patch, ILPatchImportStatus.BaseChanged, target, candidates.ToArray(),
 					$"Exact target found, but its current body hash {ShortHash(snapshot.CanonicalHash)} differs from both patch baseline {ShortHash(patch.BaseBody.CanonicalHash)} and patched body {ShortHash(patch.PatchedBody.CanonicalHash)}.",
-					snapshot.CanonicalHash, structuralCandidates);
+					snapshot.CanonicalHash, structuralCandidates, rebasePreview);
 			}
 
 			string message = "Exact target and baseline body hash match.";
