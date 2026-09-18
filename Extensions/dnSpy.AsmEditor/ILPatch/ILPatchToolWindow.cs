@@ -221,6 +221,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			importGrid.Columns.Add(CreateTextColumn("Baseline", nameof(ImportRow.BaseHash), 1));
 			importGrid.Columns.Add(CreateTextColumn("Top candidate", nameof(ImportRow.Candidate), 2));
 			importGrid.Columns.Add(CreateTextColumn("Score", nameof(ImportRow.Score), 0.7));
+			importGrid.Columns.Add(CreateTextColumn("Rebase", nameof(ImportRow.Rebase), 0.8));
 			importGrid.Columns.Add(CreateTextColumn("Details", nameof(ImportRow.Details), 2.5));
 			importGrid.ItemsSource = imports;
 			importGrid.SelectionChanged += ImportGrid_SelectionChanged;
@@ -353,15 +354,20 @@ namespace dnSpy.AsmEditor.ILPatch {
 					BaseHash = ShortHash(result.Patch.BaseBody?.CanonicalHash),
 					Candidate = bestCandidate?.Identity.ToString() ?? "—",
 					Score = bestCandidate is null ? "—" : $"{bestCandidate.Score:P1}",
+					Rebase = result.RebasePreview?.Status.ToString() ?? "—",
 					Details = BuildCandidateSummary(result),
 				});
 			}
 
+			int cleanRebase = preview.Results.Count(a => a.RebasePreview?.Status == ILPatchRebaseStatus.Clean);
+			int conflictRebase = preview.Results.Count(a => a.RebasePreview?.Status == ILPatchRebaseStatus.Conflict);
+			int unsupportedRebase = preview.Results.Count(a => a.RebasePreview?.Status == ILPatchRebaseStatus.Unsupported);
 			importSummaryText.Text =
 				$"{Path.GetFileName(filename)}: {preview.Results.Count} method(s) — " +
 				$"{preview.Count(ILPatchImportStatus.Exact)} exact, " +
 				$"{preview.Count(ILPatchImportStatus.AlreadyApplied)} already applied, " +
-				$"{preview.Count(ILPatchImportStatus.BaseChanged)} base changed, " +
+				$"{preview.Count(ILPatchImportStatus.BaseChanged)} base changed " +
+				$"(rebase: {cleanRebase} clean / {conflictRebase} conflict / {unsupportedRebase} unsupported), " +
 				$"{preview.Count(ILPatchImportStatus.Missing)} missing, " +
 				$"{preview.Count(ILPatchImportStatus.Ambiguous)} ambiguous.";
 			applyButton.IsEnabled = preview.Count(ILPatchImportStatus.Exact) != 0;
@@ -477,6 +483,29 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var builder = new StringBuilder();
 			builder.AppendLine($"Import preview: {result.Status}");
 			builder.AppendLine(result.Message);
+			if (result.RebasePreview is not null) {
+				var rebase = result.RebasePreview;
+				builder.AppendLine();
+				builder.AppendLine($"Three-way rebase analysis: {rebase.Status}");
+				builder.AppendLine(rebase.Message);
+				if (rebase.LocalsChangedByPatch || rebase.ExceptionHandlersChangedByPatch || rebase.InitLocalsChangedByPatch) {
+					builder.Append("Patch body metadata changes: ")
+						.Append($"locals={rebase.LocalsChangedByPatch}, ")
+						.Append($"exceptionHandlers={rebase.ExceptionHandlersChangedByPatch}, ")
+						.AppendLine($"initLocals={rebase.InitLocalsChangedByPatch}");
+				}
+				for (int i = 0; i < rebase.Hunks.Count; i++) {
+					var hunk = rebase.Hunks[i];
+					builder.Append("  Hunk ").Append(i + 1)
+						.Append(": base [").Append(hunk.BaseStart).Append(", ").Append(hunk.BaseStart + hunk.BaseLength)
+						.Append(") -> patched [").Append(hunk.PatchedStart).Append(", ").Append(hunk.PatchedStart + hunk.PatchedLength)
+						.Append(") => ");
+					if (hunk.NewStart >= 0)
+						builder.Append("current [").Append(hunk.NewStart).Append(", ").Append(hunk.NewStart + hunk.NewLength).Append(") ");
+					builder.Append(hunk.Status).Append(": ").AppendLine(hunk.Message);
+				}
+				builder.AppendLine("Rebase analysis is advisory only; Apply Exact will not apply BaseChanged methods.");
+			}
 			if (result.StructuralCandidates.Count != 0) {
 				builder.AppendLine();
 				builder.AppendLine("Structural candidates (advisory only; these do not authorize Apply Exact):");
@@ -500,19 +529,27 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		static string BuildCandidateSummary(ILPatchImportResult result) {
+			var details = new List<string> { result.Message };
+			if (result.RebasePreview is not null)
+				details.Add($"Three-way analysis: {result.RebasePreview.Status} ({result.RebasePreview.Hunks.Count} hunk(s)).");
+
 			var best = result.StructuralCandidates.FirstOrDefault();
 			if (best is null)
-				return result.Message;
+				return string.Join(" ", details);
+
 			string confidence;
 			var second = result.StructuralCandidates.Skip(1).FirstOrDefault();
 			double margin = second is null ? best.Score : best.Score - second.Score;
 			if (best.Score >= 0.85 && margin >= 0.08)
 				confidence = "strong structural lead";
+			else if (best.Score >= 0.85)
+				confidence = "high-score but ambiguous structural lead";
 			else if (best.Score >= 0.70)
 				confidence = "possible structural lead";
 			else
 				confidence = "weak structural lead";
-			return $"{result.Message} Top candidate is a {confidence} ({best.Score:P1}, margin {margin:P1}).";
+			details.Add($"Top candidate is a {confidence} ({best.Score:P1}, margin {margin:P1}).");
+			return string.Join(" ", details);
 		}
 
 		static string BuildInstructionDiff(ILPatchMethodChange change) {
@@ -588,6 +625,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			public string BaseHash { get; set; } = string.Empty;
 			public string Candidate { get; set; } = string.Empty;
 			public string Score { get; set; } = string.Empty;
+			public string Rebase { get; set; } = string.Empty;
 			public string Details { get; set; } = string.Empty;
 		}
 
