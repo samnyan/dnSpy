@@ -309,8 +309,20 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 				using (var loaded = ModuleDefMD.Load(inputPath)) {
 					var loadedDocument = ILPatchSerializer.Load(patchPath);
+					var loadedMethod = loaded.GetTypes()
+						.SelectMany(a => a.Methods)
+						.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Run"));
+					var loadedSnapshot = CilNormalizer.CreateSnapshot(loadedMethod);
+					loadedSnapshot.CanonicalHash = ILPatchBodyHasher.Compute(loadedSnapshot);
 					var report = ILPatchHeadlessApplier.Apply(loaded, loadedDocument);
-					True(report.Success, "On-disk input should accept the Exact patch.");
+					var entry = report.Entries[0];
+					True(report.Success,
+						"On-disk input should accept the Exact patch. " +
+						$"Action={entry.Action}; message={entry.Message}; " +
+						$"patchTarget={loadedDocument.Methods[0].Target.ToCanonicalString()}; " +
+						$"loadedTarget={ILPatchMethodIdentity.Create(loadedMethod).ToCanonicalString()}; " +
+						$"baseHash={loadedDocument.Methods[0].BaseBody.CanonicalHash}; " +
+						$"loadedHash={loadedSnapshot.CanonicalHash}.");
 					loaded.Write(outputPath);
 				}
 
