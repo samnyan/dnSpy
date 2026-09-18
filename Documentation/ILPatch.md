@@ -135,7 +135,7 @@ Normalized metadata references must be rebound to real dnlib objects before writ
 
 The fork's GitHub Actions workflow is enabled and feature-branch pushes validate the implementation across all supported Windows build targets.
 
-Before the Windows build matrix starts, a lightweight `ILPatch.CoreTests` console project runs regression tests directly against the linked core source files. This keeps rebase/matching regressions independent from the WPF/MEF application startup path.
+Before the Windows build matrix starts, a lightweight `ILPatch.CoreTests` console project runs regression tests directly against the linked core source files. This keeps rebase/matching/batch-composition regressions independent from the WPF/MEF application startup path.
 
 CI then builds the CLI, runs a real child-process integration flow (`input.dll + .ilpatch -> ilpatch apply -> output.dll -> reload/verify`), and publishes both a framework-dependent Windows x64 package and a portable `dotnet ilpatch.dll` package as short-lived workflow artifacts. On `release` events, a separate write-scoped job waits for the CLI gate and Windows build matrix, downloads those two artifacts, archives them, and attaches them to the GitHub Release.
 
@@ -168,7 +168,11 @@ The first UI can show normalized IL. A decompiled C# diff can be added as a conv
 - [x] Exact method identity + baseline hash validation.
 - [x] Preview before applying with Exact / AlreadyApplied / RebasedApplied / BaseChanged / Missing / Ambiguous / Incompatible states.
 - [x] Apply Exact entries through dnSpy's undo command service so imported patches are undoable.
+- [x] Multi-file GUI import for independent method targets, with source-file provenance shown per row.
+- [x] Reject duplicate patch ids or overlapping target methods in one GUI batch so order-dependent patches must be applied/rebased sequentially.
 - [x] Never write the assembly automatically; saving remains an explicit dnSpy action.
+
+The import dialog supports selecting multiple `.ilpatch` files. Independent entries are combined into one preview and one undoable application batch, while the **Source** column keeps each method traceable to its original patch file. The batch composer intentionally refuses two selected files that target the same method identity: those patches may depend on application order, so silently flattening them against one pre-mutation baseline would be unsafe.
 
 ### Phase 4 - cross-version rebase
 Manual candidate selection is session-local until the user explicitly exports an updated definition. Choosing **Use Candidate** stores an in-memory override and re-evaluates Exact/Clean-Rebase safety checks against that method; it never mutates the imported source file in place.

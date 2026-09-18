@@ -25,6 +25,7 @@
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchDefinitionRebaser.cs" Link="Core\ILPatchDefinitionRebaser.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchBodyMaterializer.cs" Link="Core\ILPatchBodyMaterializer.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchHeadlessApplier.cs" Link="Core\ILPatchHeadlessApplier.cs" />
+    <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchBatchComposer.cs" Link="Core\ILPatchBatchComposer.cs" />
   </ItemGroup>
 
 </Project>

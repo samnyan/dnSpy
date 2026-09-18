@@ -118,6 +118,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly ObservableCollection<HistoryRow> history = new ObservableCollection<HistoryRow>();
 		readonly Dictionary<string, ILPatchMethodIdentity> targetOverrides =
 			new Dictionary<string, ILPatchMethodIdentity>(StringComparer.Ordinal);
+		readonly Dictionary<ILPatchMethodChange, string> importedPatchSources =
+			new Dictionary<ILPatchMethodChange, string>();
 		readonly TextBlock summaryText;
 		readonly TextBlock importSummaryText;
 		readonly TextBox diffText;
@@ -132,7 +134,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly Button exportRebasedButton;
 		readonly Button exportButton;
 		ILPatchImportPreview? importedPreview;
-		string? importedFilename;
+		string? importedSourceLabel;
+		string? importedDefaultBaseName;
 
 		public DataGrid ChangesGrid { get; }
 
@@ -253,6 +256,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			importGrid = CreateGrid();
 			importGrid.Columns.Add(CreateTextColumn("Status", nameof(ImportRow.Status), 0.8));
+			importGrid.Columns.Add(CreateTextColumn("Source", nameof(ImportRow.Source), 1.1));
 			importGrid.Columns.Add(CreateTextColumn("Method", nameof(ImportRow.Method), 2.5));
 			importGrid.Columns.Add(CreateTextColumn("Current", nameof(ImportRow.CurrentHash), 1));
 			importGrid.Columns.Add(CreateTextColumn("Baseline", nameof(ImportRow.BaseHash), 1));
@@ -429,26 +433,61 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Filter = "IL Patch (*.ilpatch)|*.ilpatch|JSON (*.json)|*.json|All files (*.*)|*.*",
 				DefaultExt = ".ilpatch",
 				CheckFileExists = true,
-				Multiselect = false,
+				Multiselect = true,
 			};
 			if (dialog.ShowDialog(Window.GetWindow(this)) != true)
 				return;
 
 			try {
-				var document = ILPatchSerializer.Load(dialog.FileName);
+				var filenames = dialog.FileNames.ToArray();
+				Array.Sort(filenames, StringComparer.OrdinalIgnoreCase);
+				var sources = new List<ILPatchBatchSource>(filenames.Length);
+				var sourceMap = new Dictionary<ILPatchMethodChange, string>();
+				foreach (string filename in filenames) {
+					var document = ILPatchSerializer.Load(filename);
+					string sourceName = Path.GetFileName(filename);
+					sources.Add(new ILPatchBatchSource(sourceName, document));
+					foreach (var patch in document.Methods)
+						sourceMap[patch] = sourceName;
+				}
+
+				ILPatchDocument documentToPreview;
+				string sourceLabel;
+				string defaultBaseName;
+				if (sources.Count == 1) {
+					documentToPreview = sources[0].Document;
+					sourceLabel = sources[0].Name;
+					defaultBaseName = Path.GetFileNameWithoutExtension(filenames[0]);
+				}
+				else {
+					if (!ILPatchBatchComposer.TryCombine(sources, out var combined, out string error) || combined is null) {
+						MsgBox.Instance.Show(
+							"Cannot import the selected patch files as one batch.\n\n" + error +
+							"\n\nApply/rebase overlapping patch files sequentially instead.");
+						return;
+					}
+					documentToPreview = combined;
+					sourceLabel = $"{sources.Count} patch files";
+					defaultBaseName = "batch";
+				}
+
+				importedPatchSources.Clear();
+				foreach (var pair in sourceMap)
+					importedPatchSources[pair.Key] = pair.Value;
 				targetOverrides.Clear();
 				var modules = documentService.GetDocuments().GetModules<ModuleDef>();
-				var preview = ILPatchImportMatcher.CreatePreview(document, modules, targetOverrides);
-				ShowImportPreview(dialog.FileName, preview);
+				var preview = ILPatchImportMatcher.CreatePreview(documentToPreview, modules, targetOverrides);
+				ShowImportPreview(sourceLabel, defaultBaseName, preview);
 			}
 			catch (Exception ex) {
 				MsgBox.Instance.Show(ex);
 			}
 		}
 
-		void ShowImportPreview(string filename, ILPatchImportPreview preview) {
+		void ShowImportPreview(string sourceLabel, string defaultBaseName, ILPatchImportPreview preview) {
 			string? selectedPatchId = (importGrid.SelectedItem as ImportRow)?.Result.Patch.Id;
-			importedFilename = filename;
+			importedSourceLabel = sourceLabel;
+			importedDefaultBaseName = defaultBaseName;
 			importedPreview = preview;
 			imports.Clear();
 			foreach (var result in preview.Results) {
@@ -460,6 +499,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				imports.Add(new ImportRow {
 					Result = result,
 					Status = result.IsManualTarget ? result.Status + " (manual)" : result.Status.ToString(),
+					Source = importedPatchSources.TryGetValue(result.Patch, out string? source) ? source : "—",
 					Method = result.Patch.Target?.ToString() ?? "<invalid patch entry>",
 					CurrentHash = ShortHash(result.CurrentBodyHash),
 					BaseHash = ShortHash(result.Patch.BaseBody?.CanonicalHash),
@@ -476,7 +516,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			int conflictRebase = preview.Results.Count(a => a.Status == ILPatchImportStatus.BaseChanged && a.RebasePreview?.Status == ILPatchRebaseStatus.Conflict);
 			int unsupportedRebase = preview.Results.Count(a => a.Status == ILPatchImportStatus.BaseChanged && a.RebasePreview?.Status == ILPatchRebaseStatus.Unsupported);
 			importSummaryText.Text =
-				$"{Path.GetFileName(filename)}: {preview.Results.Count} method(s) — " +
+				$"{sourceLabel}: {preview.Results.Count} method(s) — " +
 				$"{preview.Count(ILPatchImportStatus.Exact)} exact, " +
 				$"{preview.Count(ILPatchImportStatus.AlreadyApplied)} directly applied, " +
 				$"{preview.Count(ILPatchImportStatus.RebasedApplied)} rebased applied, " +
@@ -496,22 +536,22 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		void RefreshImportedPreview() {
-			if (importedPreview is null || importedFilename is null)
+			if (importedPreview is null || importedSourceLabel is null || importedDefaultBaseName is null)
 				return;
 			var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
 			var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
-			ShowImportPreview(importedFilename, preview);
+			ShowImportPreview(importedSourceLabel, importedDefaultBaseName, preview);
 		}
 
 		void ApplyButton_Click(object sender, RoutedEventArgs e) {
-			if (importedPreview is null || importedFilename is null)
+			if (importedPreview is null || importedSourceLabel is null || importedDefaultBaseName is null)
 				return;
 
 			try {
 				// Revalidate immediately before mutation so a stale preview can never authorize an apply.
 				var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
 				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
-				ShowImportPreview(importedFilename, preview);
+				ShowImportPreview(importedSourceLabel!, importedDefaultBaseName!, preview);
 
 				var exactResults = preview.Results.Where(a => a.Status == ILPatchImportStatus.Exact).ToArray();
 				if (exactResults.Length == 0)
@@ -553,14 +593,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		void RebaseButton_Click(object sender, RoutedEventArgs e) {
-			if (importedPreview is null || importedFilename is null)
+			if (importedPreview is null || importedSourceLabel is null || importedDefaultBaseName is null)
 				return;
 
 			try {
 				// Re-run matching and three-way analysis immediately before materialization.
 				var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
 				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
-				ShowImportPreview(importedFilename, preview);
+				ShowImportPreview(importedSourceLabel!, importedDefaultBaseName!, preview);
 
 				var cleanResults = preview.Results
 					.Where(a => a.Status == ILPatchImportStatus.BaseChanged &&
@@ -616,13 +656,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		void ExportRebasedButton_Click(object sender, RoutedEventArgs e) {
-			if (importedPreview is null || importedFilename is null)
+			if (importedPreview is null || importedSourceLabel is null || importedDefaultBaseName is null)
 				return;
 
 			try {
 				var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
 				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
-				ShowImportPreview(importedFilename, preview);
+				ShowImportPreview(importedSourceLabel!, importedDefaultBaseName!, preview);
 
 				var updatedDocument = ILPatchDefinitionRebaser.CreateUpdatedDocument(preview, out var report);
 				if (report.UpdatedCount == 0) {
@@ -630,7 +670,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					return;
 				}
 
-				string sourceName = Path.GetFileNameWithoutExtension(importedFilename);
+				string sourceName = importedDefaultBaseName;
 				var dialog = new SaveFileDialog {
 					Title = "Export Rebased IL Patch",
 					Filter = "IL Patch (*.ilpatch)|*.ilpatch|JSON (*.json)|*.json|All files (*.*)|*.*",
@@ -943,6 +983,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		sealed class ImportRow {
 			public ILPatchImportResult Result { get; set; } = null!;
 			public string Status { get; set; } = string.Empty;
+			public string Source { get; set; } = string.Empty;
 			public string Method { get; set; } = string.Empty;
 			public string CurrentHash { get; set; } = string.Empty;
 			public string BaseHash { get; set; } = string.Empty;

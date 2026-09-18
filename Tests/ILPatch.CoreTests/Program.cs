@@ -33,6 +33,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(HeadlessApplyCleanRebasePreservesUpstream), HeadlessApplyCleanRebasePreservesUpstream),
 				(nameof(HeadlessConflictDoesNotMutateTarget), HeadlessConflictDoesNotMutateTarget),
 				(nameof(DiskRoundTripWritesPatchedAssembly), DiskRoundTripWritesPatchedAssembly),
+				(nameof(BatchComposerCombinesIndependentTargets), BatchComposerCombinesIndependentTargets),
+				(nameof(BatchComposerRejectsDuplicatePatchIds), BatchComposerRejectsDuplicatePatchIds),
+				(nameof(BatchComposerRejectsOverlappingTargets), BatchComposerRejectsOverlappingTargets),
 			};
 
 			int failed = 0;
@@ -664,6 +667,68 @@ namespace dnSpy.AsmEditor.ILPatch {
 				if (Directory.Exists(directory))
 					Directory.Delete(directory, true);
 			}
+		}
+
+		static void BatchComposerCombinesIndependentTargets() {
+			var first = CreateNamedIntMethod("First", 1);
+			var second = CreateNamedIntMethod("Second", 10);
+			var firstPatch = CreateRealBodyConstantPatch(first, 2);
+			var secondPatch = CreateRealBodyConstantPatch(second, 20);
+			var firstDocument = new ILPatchDocument { Name = "first" };
+			var secondDocument = new ILPatchDocument { Name = "second" };
+			firstDocument.Methods.Add(firstPatch);
+			secondDocument.Methods.Add(secondPatch);
+
+			var sources = new[] {
+				new ILPatchBatchSource("001-first.ilpatch", firstDocument),
+				new ILPatchBatchSource("002-second.ilpatch", secondDocument),
+			};
+			True(ILPatchBatchComposer.TryCombine(sources, out var combined, out string error), error);
+			NotNull(combined, "Combined batch document was null.");
+			Equal(2, combined!.Methods.Count, "Independent patch targets should be combined.");
+			Equal("Batch import (2 files)", combined.Name, "Batch name should describe the source count.");
+		}
+
+		static void BatchComposerRejectsDuplicatePatchIds() {
+			var first = CreateNamedIntMethod("First", 1);
+			var second = CreateNamedIntMethod("Second", 10);
+			var firstPatch = CreateRealBodyConstantPatch(first, 2);
+			var secondPatch = CreateRealBodyConstantPatch(second, 20);
+			secondPatch.Id = firstPatch.Id;
+			var firstDocument = new ILPatchDocument();
+			var secondDocument = new ILPatchDocument();
+			firstDocument.Methods.Add(firstPatch);
+			secondDocument.Methods.Add(secondPatch);
+
+			False(ILPatchBatchComposer.TryCombine(new[] {
+				new ILPatchBatchSource("a.ilpatch", firstDocument),
+				new ILPatchBatchSource("b.ilpatch", secondDocument),
+			}, out _, out string error),
+				"Duplicate patch ids must block multi-file import.");
+			True(error.Contains("appears more than once", StringComparison.Ordinal),
+				"Duplicate-id error should explain the collision.");
+		}
+
+		static void BatchComposerRejectsOverlappingTargets() {
+			var target = CreateTarget();
+			var firstPatch = Change(target,
+				Snapshot(target, Ldc(1), Op("ret")),
+				Snapshot(target, Ldc(2), Op("ret")));
+			var secondPatch = Change(target,
+				Snapshot(target, Ldc(1), Op("ret")),
+				Snapshot(target, Ldc(3), Op("ret")));
+			var firstDocument = new ILPatchDocument();
+			var secondDocument = new ILPatchDocument();
+			firstDocument.Methods.Add(firstPatch);
+			secondDocument.Methods.Add(secondPatch);
+
+			False(ILPatchBatchComposer.TryCombine(new[] {
+				new ILPatchBatchSource("first.ilpatch", firstDocument),
+				new ILPatchBatchSource("second.ilpatch", secondDocument),
+			}, out _, out string error),
+				"Multiple selected files targeting the same method must not be combined.");
+			True(error.Contains("apply/rebase them sequentially", StringComparison.Ordinal),
+				"Overlapping-target error should direct the user to sequential application.");
 		}
 
 		static ILPatchMethodChange CreateRealBodyConstantPatch(MethodDef target, int patchedValue) {
