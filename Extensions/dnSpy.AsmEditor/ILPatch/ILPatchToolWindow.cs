@@ -30,6 +30,7 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using dnlib.DotNet;
+using dnSpy.AsmEditor.Commands;
 using dnSpy.AsmEditor.UndoRedo;
 using dnSpy.Contracts.App;
 using dnSpy.Contracts.Controls;
