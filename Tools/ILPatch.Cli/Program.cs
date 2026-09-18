@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using dnlib.DotNet;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
 
 namespace dnSpy.AsmEditor.ILPatch {
 	static class Program {
@@ -10,7 +12,37 @@ namespace dnSpy.AsmEditor.ILPatch {
 			public bool DryRun { get; set; }
 			public string InputPath { get; set; } = string.Empty;
 			public string? OutputPath { get; set; }
+			public string? JsonReportPath { get; set; }
 			public List<string> PatchPaths { get; } = new List<string>();
+		}
+
+		sealed class ApplyJsonReport {
+			public int FormatVersion { get; set; } = 1;
+			public string Input { get; set; } = string.Empty;
+			public string? Output { get; set; }
+			public bool DryRun { get; set; }
+			public bool Success { get; set; }
+			public int ExitCode { get; set; }
+			public bool OutputWritten { get; set; }
+			public int ApplicableCount { get; set; }
+			public int AlreadyPresentCount { get; set; }
+			public List<PatchJsonReport> Patches { get; } = new List<PatchJsonReport>();
+		}
+
+		sealed class PatchJsonReport {
+			public string Path { get; set; } = string.Empty;
+			public string Name { get; set; } = string.Empty;
+			public bool Success { get; set; }
+			public int ApplicableCount { get; set; }
+			public int AlreadyPresentCount { get; set; }
+			public List<EntryJsonReport> Entries { get; } = new List<EntryJsonReport>();
+		}
+
+		sealed class EntryJsonReport {
+			public string PatchId { get; set; } = string.Empty;
+			public string Target { get; set; } = string.Empty;
+			public string Action { get; set; } = string.Empty;
+			public string Message { get; set; } = string.Empty;
 		}
 
 		static int Main(string[] args) {
@@ -43,7 +75,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			string inputPath = Path.GetFullPath(options.InputPath);
 			string? outputPath = options.OutputPath is null ? null : Path.GetFullPath(options.OutputPath);
+			string? jsonReportPath = options.JsonReportPath is null ? null : Path.GetFullPath(options.JsonReportPath);
 			var patchPaths = options.PatchPaths.Select(Path.GetFullPath).ToArray();
+
+			var jsonReport = new ApplyJsonReport {
+				Input = inputPath,
+				Output = outputPath,
+				DryRun = options.DryRun,
+			};
 
 			if (!File.Exists(inputPath))
 				throw new FileNotFoundException("Input assembly was not found.", inputPath);
@@ -62,7 +101,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Console.WriteLine($"Module: {module.FullName}");
 			Console.WriteLine();
 
-			int totalApplied = 0;
+			int totalApplicable = 0;
 			int totalPresent = 0;
 			foreach (string patchPath in patchPaths) {
 				var document = ILPatchSerializer.Load(patchPath);
@@ -70,18 +109,31 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 				var report = ILPatchHeadlessApplier.Apply(module, document);
 				PrintReport(report);
+				jsonReport.Patches.Add(CreateJsonPatchReport(patchPath, document, report));
 				if (!report.Success) {
+					jsonReport.Success = false;
+					jsonReport.ExitCode = 2;
+					jsonReport.OutputWritten = false;
+					jsonReport.ApplicableCount = totalApplicable;
+					jsonReport.AlreadyPresentCount = totalPresent + report.AlreadyPresentCount;
+					WriteJsonReport(jsonReportPath, jsonReport);
 					Console.Error.WriteLine();
 					Console.Error.WriteLine("Patch set contains unresolved entries. No output file was written.");
 					return 2;
 				}
-				totalApplied += report.AppliedCount;
+				totalApplicable += report.AppliedCount;
 				totalPresent += report.AlreadyPresentCount;
 				Console.WriteLine();
 			}
 
-			Console.WriteLine($"Summary: {totalApplied} applied, {totalPresent} already present.");
+			Console.WriteLine($"Summary: {totalApplicable} applicable, {totalPresent} already present.");
+			jsonReport.Success = true;
+			jsonReport.ExitCode = 0;
+			jsonReport.ApplicableCount = totalApplicable;
+			jsonReport.AlreadyPresentCount = totalPresent;
 			if (options.DryRun) {
+				jsonReport.OutputWritten = false;
+				WriteJsonReport(jsonReportPath, jsonReport);
 				Console.WriteLine("Dry run succeeded. No output file was written.");
 				return 0;
 			}
@@ -92,6 +144,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (!string.IsNullOrEmpty(outputDirectory))
 				Directory.CreateDirectory(outputDirectory);
 			module.Write(outputPath);
+			jsonReport.OutputWritten = true;
+			WriteJsonReport(jsonReportPath, jsonReport);
 			Console.WriteLine($"Wrote: {outputPath}");
 			return 0;
 		}
@@ -120,6 +174,18 @@ namespace dnSpy.AsmEditor.ILPatch {
 					options.OutputPath = args[i];
 					continue;
 				}
+				if (StringComparer.Ordinal.Equals(arg, "--json")) {
+					if (++i >= args.Length) {
+						error = "--json requires a report filename.";
+						return false;
+					}
+					if (options.JsonReportPath is not null) {
+						error = "JSON report path was specified more than once.";
+						return false;
+					}
+					options.JsonReportPath = args[i];
+					continue;
+				}
 				if (IsHelp(arg)) {
 					error = "Help requested.";
 					return false;
@@ -145,6 +211,42 @@ namespace dnSpy.AsmEditor.ILPatch {
 			return true;
 		}
 
+		static PatchJsonReport CreateJsonPatchReport(string patchPath, ILPatchDocument document,
+			ILPatchHeadlessApplyReport report) {
+			var result = new PatchJsonReport {
+				Path = patchPath,
+				Name = document.Name,
+				Success = report.Success,
+				ApplicableCount = report.AppliedCount,
+				AlreadyPresentCount = report.AlreadyPresentCount,
+			};
+			foreach (var entry in report.Entries) {
+				string target = entry.Target is null
+					? entry.Patch.Target?.ToCanonicalString() ?? string.Empty
+					: ILPatchMethodIdentity.Create(entry.Target).ToCanonicalString();
+				result.Entries.Add(new EntryJsonReport {
+					PatchId = entry.Patch.Id,
+					Target = target,
+					Action = entry.Action.ToString(),
+					Message = entry.Message,
+				});
+			}
+			return result;
+		}
+
+		static void WriteJsonReport(string? path, ApplyJsonReport report) {
+			if (path is null)
+				return;
+			string? directory = Path.GetDirectoryName(path);
+			if (!string.IsNullOrEmpty(directory))
+				Directory.CreateDirectory(directory);
+			var settings = new JsonSerializerSettings {
+				ContractResolver = new CamelCasePropertyNamesContractResolver(),
+			};
+			File.WriteAllText(path, JsonConvert.SerializeObject(report, Formatting.Indented, settings));
+			Console.WriteLine($"JSON report: {path}");
+		}
+
 		static void PrintReport(ILPatchHeadlessApplyReport report) {
 			foreach (var entry in report.Entries) {
 				string target = entry.Target is null
@@ -152,10 +254,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 					: ILPatchMethodIdentity.Create(entry.Target).ToString();
 				string prefix;
 				switch (entry.Action) {
-				case ILPatchHeadlessAction.AppliedExact:
+				case ILPatchHeadlessAction.Exact:
 					prefix = "EXACT";
 					break;
-				case ILPatchHeadlessAction.AppliedCleanRebase:
+				case ILPatchHeadlessAction.CleanRebase:
 					prefix = "REBASE";
 					break;
 				case ILPatchHeadlessAction.AlreadyPresent:
@@ -189,8 +291,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		static void PrintApplyUsage() {
 			Console.WriteLine("Usage:");
-			Console.WriteLine("  ilpatch apply <input.dll> <patch1.ilpatch> [patch2.ilpatch ...] -o <output.dll>");
-			Console.WriteLine("  ilpatch apply --dry-run <input.dll> <patch1.ilpatch> [patch2.ilpatch ...]");
+			Console.WriteLine("  ilpatch apply <input.dll> <patch1.ilpatch> [patch2.ilpatch ...] -o <output.dll> [--json <report.json>]");
+			Console.WriteLine("  ilpatch apply --dry-run <input.dll> <patch1.ilpatch> [patch2.ilpatch ...] [--json <report.json>]");
 			Console.WriteLine();
 			Console.WriteLine("Exit codes:");
 			Console.WriteLine("  0  Success");

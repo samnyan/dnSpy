@@ -24,8 +24,8 @@ using dnlib.DotNet.Emit;
 
 namespace dnSpy.AsmEditor.ILPatch {
 	enum ILPatchHeadlessAction {
-		AppliedExact,
-		AppliedCleanRebase,
+		Exact,
+		CleanRebase,
 		AlreadyPresent,
 		Unresolved,
 	}
@@ -102,7 +102,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					if (TryPlanBody(result, result.Patch.PatchedBody, materializer, seenTargets,
 						planned, out string exactError)) {
 						entries.Add(new ILPatchHeadlessEntryResult(result.Patch, result.Target,
-							ILPatchHeadlessAction.AppliedExact, "Exact target and baseline match."));
+							ILPatchHeadlessAction.Exact, "Exact target and baseline match."));
 					}
 					else {
 						entries.Add(new ILPatchHeadlessEntryResult(result.Patch, result.Target,
@@ -130,7 +130,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					}
 					if (TryPlanBody(result, merged, materializer, seenTargets, planned, out string rebaseError)) {
 						entries.Add(new ILPatchHeadlessEntryResult(result.Patch, result.Target,
-							ILPatchHeadlessAction.AppliedCleanRebase, "Three-way rebase is clean."));
+							ILPatchHeadlessAction.CleanRebase, "Three-way rebase is clean."));
 					}
 					else {
 						entries.Add(new ILPatchHeadlessEntryResult(result.Patch, result.Target,

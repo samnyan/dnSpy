@@ -195,6 +195,9 @@ ilpatch apply Assembly-CSharp.dll patches/001.ilpatch patches/002.ilpatch -o Ass
 
 # Perform the complete matching/rebase/materialization pass without writing a DLL.
 ilpatch apply --dry-run Assembly-CSharp.dll patches/001.ilpatch patches/002.ilpatch
+
+# Write a machine-readable report for CI/MCP/batch tooling.
+ilpatch apply Assembly-CSharp.dll patches/001.ilpatch -o Assembly-CSharp.patched.dll --json ilpatch-report.json
 ```
 
 The MVP is deliberately fail-closed:
@@ -208,6 +211,8 @@ The MVP is deliberately fail-closed:
 
 Exit codes are `0` for success, `1` for usage/I/O/unexpected failures and `2` for unresolved patch entries.
 
+`--json <report.json>` writes a camelCase report without changing the normal console output. The report includes the input/output paths, dry-run state, success/exit code, whether an output assembly was written, aggregate applicable/already-present counts, and per-patch/per-entry actions (`Exact`, `CleanRebase`, `AlreadyPresent`, or `Unresolved`). Conflict reports are written before exiting with code 2 and explicitly report `outputWritten: false`.
+
 The CLI currently accepts already-resolved patch definitions. Structural candidates are printed for diagnosis but never auto-selected; use the dnSpy Patch Workspace to confirm a manual candidate and **Export Rebased .ilpatch...** before headless deployment.
 
 - [x] Extract method-body materialization into pure dnlib core code.
@@ -217,7 +222,7 @@ The CLI currently accepts already-resolved patch definitions. Structural candida
 - [x] Add a real CLI child-process / on-disk assembly integration test.
 - [x] Publish portable and Windows x64 CLI packages as CI artifacts.
 - [ ] Attach CLI packages to GitHub releases.
-- [ ] Add optional machine-readable JSON report output.
+- [x] Add machine-readable JSON report output for success and conflict paths.
 - [ ] Add explicit partial-apply mode only if a real workflow needs it.
 
 ## Non-goals for the first version

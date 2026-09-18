@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using dnlib.DotNet;
+using Newtonsoft.Json.Linq;
 
 namespace dnSpy.AsmEditor.ILPatch {
 	static class Program {
@@ -55,6 +56,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 					VerifyCliOutput(args[1]);
 					return 0;
 				}
+				if (args.Length == 4 && StringComparer.Ordinal.Equals(args[0], "verify-cli-report")) {
+					VerifyCliReport(args[1], bool.Parse(args[2]), int.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture));
+					return 0;
+				}
 				Console.Error.WriteLine("Unknown ILPatch.CoreTests utility command.");
 				return 2;
 			}
@@ -69,6 +74,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Directory.CreateDirectory(directory);
 
 			string inputPath = Path.Combine(directory, "input.dll");
+			string conflictInputPath = Path.Combine(directory, "conflict-input.dll");
 			string patchPath = Path.Combine(directory, "change.ilpatch");
 
 			var patchSource = CreateNamedIntMethod("Run", 1);
@@ -79,8 +85,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			var inputMethod = CreateNamedIntMethod("Run", 1);
 			inputMethod.Module.Write(inputPath);
+			var conflictMethod = CreateNamedIntMethod("Run", 3);
+			conflictMethod.Module.Write(conflictInputPath);
 
 			Console.WriteLine(inputPath);
+			Console.WriteLine(conflictInputPath);
 			Console.WriteLine(patchPath);
 		}
 
@@ -94,6 +103,26 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Equal(2L, snapshot.Instructions[0].Operand.IntegerValue,
 				"CLI process output assembly must contain the patched IL.");
 			Console.WriteLine("CLI process output verified.");
+		}
+
+		static void VerifyCliReport(string reportPath, bool expectedSuccess, int expectedExitCode) {
+			reportPath = Path.GetFullPath(reportPath);
+			var json = JObject.Parse(File.ReadAllText(reportPath));
+			Equal(1, (int?)json["formatVersion"] ?? -1, "CLI JSON report format version mismatch.");
+			Equal(expectedSuccess, (bool?)json["success"] ?? !expectedSuccess,
+				"CLI JSON report success flag mismatch.");
+			Equal(expectedExitCode, (int?)json["exitCode"] ?? -1,
+				"CLI JSON report exit code mismatch.");
+			var patches = json["patches"] as JArray;
+			True(patches is not null && patches.Count != 0, "CLI JSON report must contain patch results.");
+			var entries = patches![0]?["entries"] as JArray;
+			True(entries is not null && entries.Count != 0, "CLI JSON report must contain entry results.");
+			string? action = (string?)entries![0]?["action"];
+			if (expectedSuccess)
+				Equal("Exact", action, "Successful fixture should report an Exact action.");
+			else
+				Equal("Unresolved", action, "Conflicting fixture should report an Unresolved action.");
+			Console.WriteLine("CLI JSON report verified.");
 		}
 
 		static void BodyHashIgnoresMaxStack() {
@@ -318,7 +347,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var report = ILPatchHeadlessApplier.Apply(current.Module, document);
 			True(report.Success, "Exact headless patch should succeed.");
 			Equal(1, report.AppliedCount, "Exactly one method should be applied.");
-			Equal(ILPatchHeadlessAction.AppliedExact, report.Entries[0].Action,
+			Equal(ILPatchHeadlessAction.Exact, report.Entries[0].Action,
 				"Exact patch should report AppliedExact.");
 			var snapshot = CilNormalizer.CreateSnapshot(current);
 			Equal(2L, snapshot.Instructions[0].Operand.IntegerValue,
@@ -336,7 +365,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			var report = ILPatchHeadlessApplier.Apply(current.Module, document);
 			True(report.Success, "Independent upstream insertion should headlessly rebase.");
-			Equal(ILPatchHeadlessAction.AppliedCleanRebase, report.Entries[0].Action,
+			Equal(ILPatchHeadlessAction.CleanRebase, report.Entries[0].Action,
 				"Headless action should report a clean rebase.");
 			var snapshot = CilNormalizer.CreateSnapshot(current);
 			Equal(3, snapshot.Instructions.Count, "Upstream insertion must remain.");
