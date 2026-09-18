@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using dnlib.DotNet;
 
 namespace dnSpy.AsmEditor.ILPatch {
@@ -19,6 +21,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(HeadlessApplyExactMutatesTarget), HeadlessApplyExactMutatesTarget),
 				(nameof(HeadlessApplyCleanRebasePreservesUpstream), HeadlessApplyCleanRebasePreservesUpstream),
 				(nameof(HeadlessConflictDoesNotMutateTarget), HeadlessConflictDoesNotMutateTarget),
+				(nameof(DiskRoundTripWritesPatchedAssembly), DiskRoundTripWritesPatchedAssembly),
 			};
 
 			int failed = 0;
@@ -285,6 +288,45 @@ namespace dnSpy.AsmEditor.ILPatch {
 			after.CanonicalHash = ILPatchBodyHasher.Compute(after);
 			Equal(before.CanonicalHash, after.CanonicalHash,
 				"Failed headless preflight must not mutate the target MethodDef.");
+		}
+
+		static void DiskRoundTripWritesPatchedAssembly() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-core-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string inputPath = Path.Combine(directory, "input.dll");
+				string patchPath = Path.Combine(directory, "change.ilpatch");
+				string outputPath = Path.Combine(directory, "output.dll");
+
+				var patchSource = CreateNamedIntMethod("Run", 1);
+				var patch = CreateRealBodyConstantPatch(patchSource, 2);
+				var document = new ILPatchDocument { Name = "disk-round-trip" };
+				document.Methods.Add(patch);
+				ILPatchSerializer.Save(patchPath, document);
+
+				var inputMethod = CreateNamedIntMethod("Run", 1);
+				inputMethod.Module.Write(inputPath);
+
+				using (var loaded = ModuleDefMD.Load(inputPath)) {
+					var loadedDocument = ILPatchSerializer.Load(patchPath);
+					var report = ILPatchHeadlessApplier.Apply(loaded, loadedDocument);
+					True(report.Success, "On-disk input should accept the Exact patch.");
+					loaded.Write(outputPath);
+				}
+
+				using (var verified = ModuleDefMD.Load(outputPath)) {
+					var method = verified.GetTypes()
+						.SelectMany(a => a.Methods)
+						.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Run"));
+					var snapshot = CilNormalizer.CreateSnapshot(method);
+					Equal(2L, snapshot.Instructions[0].Operand.IntegerValue,
+						"Reloaded output assembly must contain the patched IL.");
+				}
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
 		}
 
 		static ILPatchMethodChange CreateRealBodyConstantPatch(MethodDef target, int patchedValue) {
