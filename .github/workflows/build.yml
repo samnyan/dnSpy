@@ -54,7 +54,7 @@ jobs:
           dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- create-cli-fixture "$fixture"
 
           dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
-            apply "$fixture/input.dll" "$fixture/change.ilpatch" \
+            apply "$fixture/input.dll" "$fixture/patches" \
             -o "$fixture/output.dll" --json "$fixture/success-report.json"
           dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
             verify-cli-output "$fixture/output.dll"
@@ -63,7 +63,7 @@ jobs:
 
           set +e
           dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
-            apply "$fixture/conflict-input.dll" "$fixture/change.ilpatch" \
+            apply "$fixture/conflict-input.dll" "$fixture/patches" \
             -o "$fixture/conflict-output.dll" --json "$fixture/conflict-report.json"
           conflict_exit=$?
           set -e

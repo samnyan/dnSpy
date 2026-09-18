@@ -193,6 +193,9 @@ The headless path uses the same normalized CIL matcher, three-way rebase logic a
 # Apply one or more patches in order.
 ilpatch apply Assembly-CSharp.dll patches/001.ilpatch patches/002.ilpatch -o Assembly-CSharp.patched.dll
 
+# A directory expands to top-level *.ilpatch files in deterministic filename order.
+ilpatch apply Assembly-CSharp.dll patches/ -o Assembly-CSharp.patched.dll
+
 # Perform the complete matching/rebase/materialization pass without writing a DLL.
 ilpatch apply --dry-run Assembly-CSharp.dll patches/001.ilpatch patches/002.ilpatch
 
@@ -218,6 +221,7 @@ The CLI currently accepts already-resolved patch definitions. Structural candida
 - [x] Extract method-body materialization into pure dnlib core code.
 - [x] Add a pure headless apply engine shared by automation code.
 - [x] Add `Tools/ILPatch.Cli` with sequential multi-patch and `--dry-run` support.
+- [x] Accept patch directories and expand top-level `*.ilpatch` files in deterministic filename order.
 - [x] Add headless Exact / Clean-Rebase / fail-closed regression tests.
 - [x] Add a real CLI child-process / on-disk assembly integration test.
 - [x] Publish portable and Windows x64 CLI packages as CI artifacts.

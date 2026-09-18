@@ -75,7 +75,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			string inputPath = Path.Combine(directory, "input.dll");
 			string conflictInputPath = Path.Combine(directory, "conflict-input.dll");
-			string patchPath = Path.Combine(directory, "change.ilpatch");
+			string patchDirectory = Path.Combine(directory, "patches");
+			Directory.CreateDirectory(patchDirectory);
+			string patchPath = Path.Combine(patchDirectory, "001-change.ilpatch");
 
 			var patchSource = CreateNamedIntMethod("Run", 1);
 			var patch = CreateRealBodyConstantPatch(patchSource, 2);

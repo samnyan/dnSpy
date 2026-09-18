@@ -76,7 +76,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			string inputPath = Path.GetFullPath(options.InputPath);
 			string? outputPath = options.OutputPath is null ? null : Path.GetFullPath(options.OutputPath);
 			string? jsonReportPath = options.JsonReportPath is null ? null : Path.GetFullPath(options.JsonReportPath);
-			var patchPaths = options.PatchPaths.Select(Path.GetFullPath).ToArray();
+			var patchPaths = ExpandPatchPaths(options.PatchPaths);
 
 			var jsonReport = new ApplyJsonReport {
 				Input = inputPath,
@@ -198,7 +198,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 
 			if (positional.Count < 2) {
-				error = "Apply requires an input assembly and at least one .ilpatch file.";
+				error = "Apply requires an input assembly and at least one .ilpatch file or patch directory.";
 				return false;
 			}
 			options.InputPath = positional[0];
@@ -209,6 +209,29 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return false;
 			}
 			return true;
+		}
+
+		static string[] ExpandPatchPaths(IEnumerable<string> values) {
+			var result = new List<string>();
+			var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+			foreach (string value in values) {
+				string fullPath = Path.GetFullPath(value);
+				if (Directory.Exists(fullPath)) {
+					var files = Directory.GetFiles(fullPath, "*.ilpatch", SearchOption.TopDirectoryOnly);
+					Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+					if (files.Length == 0)
+						throw new InvalidOperationException($"Patch directory contains no .ilpatch files: {fullPath}");
+					foreach (string file in files) {
+						string normalized = Path.GetFullPath(file);
+						if (seen.Add(normalized))
+							result.Add(normalized);
+					}
+					continue;
+				}
+				if (seen.Add(fullPath))
+					result.Add(fullPath);
+			}
+			return result.ToArray();
 		}
 
 		static PatchJsonReport CreateJsonPatchReport(string patchPath, ILPatchDocument document,
@@ -284,15 +307,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Console.WriteLine("ILPatch - replay normalized CIL patches onto managed assemblies");
 			Console.WriteLine();
 			Console.WriteLine("Commands:");
-			Console.WriteLine("  apply    Apply one or more .ilpatch files to an assembly");
+			Console.WriteLine("  apply    Apply .ilpatch files or patch directories to an assembly");
 			Console.WriteLine();
 			PrintApplyUsage();
 		}
 
 		static void PrintApplyUsage() {
 			Console.WriteLine("Usage:");
-			Console.WriteLine("  ilpatch apply <input.dll> <patch1.ilpatch> [patch2.ilpatch ...] -o <output.dll> [--json <report.json>]");
-			Console.WriteLine("  ilpatch apply --dry-run <input.dll> <patch1.ilpatch> [patch2.ilpatch ...] [--json <report.json>]");
+			Console.WriteLine("  ilpatch apply <input.dll> <patch-or-directory> [more ...] -o <output.dll> [--json <report.json>]");
+			Console.WriteLine("  ilpatch apply --dry-run <input.dll> <patch-or-directory> [more ...] [--json <report.json>]");
 			Console.WriteLine();
 			Console.WriteLine("Exit codes:");
 			Console.WriteLine("  0  Success");
