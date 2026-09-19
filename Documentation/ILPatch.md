@@ -1,0 +1,312 @@
+# ILPatch workspace design
+
+## Goal
+
+ILPatch turns dnSpy assembly editing into a replayable patch workflow.
+
+The primary workflow is:
+
+1. Open an original managed assembly in dnSpy.
+2. Edit methods normally using **Edit Method (C#)** or **Edit IL Instructions**.
+3. dnSpy keeps the edits in memory as it does today.
+4. ILPatch automatically tracks the first method body as the baseline and the current method body as the effective change.
+5. A Patch Workspace shows edit history and the effective baseline -> current IL diff.
+6. Export the effective changes to a versioned `.ilpatch` file.
+7. Open a newer build of the assembly and import the old `.ilpatch`.
+8. Apply exact matches directly, or review structural candidates and clean three-way rebases when the newer build changed the method.
+
+This is an offline assembly editing feature. It does not inject code or hook the process at runtime.
+
+## Design principles
+
+### Patch semantic CIL, not file bytes
+
+A managed assembly rebuild can change method RVAs, instruction offsets and metadata tokens while preserving the same program logic. ILPatch therefore normalizes method bodies before comparing or matching them.
+
+The canonical representation currently normalizes:
+
+- short/long branch encodings (`br.s` / `br`, `leave.s` / `leave`, etc.);
+- implicit argument/local opcodes (`ldarg.0`, `ldloc.2`, `stloc.1`);
+- integer constant shorthand (`ldc.i4.0` ... `ldc.i4.8`, `ldc.i4.s`);
+- branch and switch operands to instruction indices instead of byte offsets;
+- method/type/field operands to stable full names instead of metadata tokens.
+
+The representation intentionally keeps semantic distinctions such as `call` vs `callvirt`.
+
+### Baseline and edit history are different things
+
+Undo history records every operation. A portable patch normally wants only the final effective change.
+
+For a method edited three times:
+
+```
+original -> edit 1 -> edit 2 -> edit 3
+```
+
+Patch Workspace keeps all three events for review, but exports:
+
+```
+original -> edit 3
+```
+
+Undoing back to the original body therefore makes the effective patch disappear without deleting the audit history.
+
+### Store both sides of a patch
+
+`.ilpatch` v1 stores both the normalized baseline body and the patched body. This is intentionally redundant. It enables a future three-way merge:
+
+```
+base (old original)
+ours (old patched)
+theirs (new original)
+```
+
+That allows an old patch to be rebased onto a new game build instead of replacing an entire method blindly.
+
+### Refuse ambiguous changes
+
+Future fuzzy matching must fail closed. If multiple target methods score similarly, or the upstream build changed the same IL region that the patch changed, the GUI should report a conflict instead of silently guessing.
+
+## v1 data model
+
+`ILPatchDocument`
+
+- format version
+- patch name
+- creation time
+- method changes
+
+`ILPatchMethodChange`
+
+- stable method identity
+- source module MVID (provenance only, never the sole locator)
+- normalized baseline body
+- normalized patched body
+
+`ILPatchMethodIdentity`
+
+- assembly/module name
+- declaring type
+- method name
+- generic arity
+- return type
+- parameter types
+- instance/static (`HasThis`)
+
+`ILPatchMethodBodySnapshot`
+
+- InitLocals / MaxStack
+- locals
+- normalized instructions
+- normalized exception handlers
+- deterministic SHA-256 canonical hash
+
+## Integration with dnSpy undo/redo
+
+The assembly editor already routes edits through `IUndoCommandService`, so ILPatch integrates with those existing editing paths instead of polling every loaded module.
+
+The current implementation captures a method's body before its first mutation:
+
+- compiler-based C# / VB edits identify the methods affected by the importer;
+- raw IL editing and Replace Body With Stub call `ILPatchWorkspace.EnsureTracked()` through `MethodBodyOptions.CopyTo()`.
+
+An auto-loaded workspace listener observes Add / Undo / Redo events and refreshes only methods that are already tracked. It also subscribes to `IDsDocumentService.CollectionChanged`; when a document is removed or the document list is cleared, tracking, pending mutations and edit-history rows belonging to those `ModuleDef` instances are removed automatically. Imported Exact patches are also applied as one `IUndoCommand`, so one Ctrl+Z reverts the whole imported batch.
+
+This keeps normal tracking O(number of edited methods), avoids retaining closed assemblies in the singleton workspace, and preserves dnSpy's existing save flow and undo semantics.
+
+## Exact import safety
+
+Import currently has a deliberately conservative exact-only path:
+
+1. Match a method by stable assembly/module/type/name/signature identity.
+2. Compare the current normalized body hash with the patch baseline.
+3. Report `Exact`, `AlreadyApplied`, `RebasedApplied`, `BaseChanged`, `Missing`, `Ambiguous`, or `Incompatible`.
+4. Re-run the preview immediately before Apply so a stale UI state cannot authorize a mutation.
+5. Materialize every Exact patched body before changing any method.
+6. Apply all successfully preflighted Exact entries as one dnSpy undo command.
+
+MVID is displayed/provided as source provenance but never used as the primary locator.
+
+Normalized metadata references must be rebound to real dnlib objects before writing a body. The v1 materializer intentionally resolves only references already represented by the target module's metadata / method bodies. Unsupported or unresolved operands fail closed and block the batch instead of guessing a token or silently generating the wrong reference.
+
+`BaseChanged` is never treated as an Exact apply. When three-way analysis proves that all patch hunks are clean and method-body metadata remains compatible, the user can explicitly choose **Apply Clean Rebase**. Structural candidates remain advisory until the user explicitly selects one as a temporary target override.
+
+## CI
+
+The fork's GitHub Actions workflow is enabled and feature-branch pushes validate the implementation across all supported Windows build targets.
+
+Before the Windows build matrix starts, a lightweight `ILPatch.CoreTests` console project runs regression tests directly against the linked core source files. This keeps rebase/matching/batch-composition regressions independent from the WPF/MEF application startup path.
+
+CI then builds the CLI, runs a real child-process integration flow (`input.dll + .ilpatch -> ilpatch apply -> output.dll -> reload/verify`), and publishes both a framework-dependent Windows x64 package and a portable `dotnet ilpatch.dll` package as short-lived workflow artifacts. On `release` events, a separate write-scoped job waits for the CLI gate and Windows build matrix, downloads those two artifacts, archives them, and attaches them to the GitHub Release.
+
+## Planned milestones
+
+### Phase 1 - tracking foundation
+
+- [x] Versioned in-memory patch model.
+- [x] CIL normalizer and deterministic method-body hash.
+- [x] Workspace model with baseline/current separation and edit history.
+- [x] Hook method-affecting undo commands into the workspace.
+- [x] Remove tracked methods/history automatically when dnSpy documents close.
+- [x] Add core regression tests for normalization/hash stability and rebase behavior.
+
+### Phase 2 - Patch Workspace UI
+
+- [x] Tool window listing modified methods.
+- [x] Per-method edit history.
+- [x] Effective normalized IL diff.
+- [x] Revert selected method to baseline through dnSpy undo/redo.
+- [x] Export all effective changes.
+
+**Revert Selected** restores the MethodBodyOptions snapshot captured immediately before the method's first tracked edit. The revert itself is one dnSpy undo command, so Ctrl+Z restores the edited body. Returning to the baseline removes that method from the effective patch list while retaining edit history.
+
+The first UI can show normalized IL. A decompiled C# diff can be added as a convenience view later; it must not become the authoritative patch representation because decompiler output is not stable enough for matching.
+
+### Phase 3 - `.ilpatch` import/export
+
+- [x] JSON serialization with explicit format versioning.
+- [x] Exact method identity + baseline hash validation.
+- [x] Preview before applying with Exact / AlreadyApplied / RebasedApplied / BaseChanged / Missing / Ambiguous / Incompatible states.
+- [x] Apply Exact entries through dnSpy's undo command service so imported patches are undoable.
+- [x] Multi-file GUI import for independent method targets, with source-file provenance shown per row.
+- [x] Apply Exact + Clean-Rebase entries together as one preflighted, undoable **Apply Safe** batch.
+- [x] Reject duplicate patch ids or overlapping target methods in one GUI batch so order-dependent patches must be applied/rebased sequentially.
+- [x] Never write the assembly automatically; saving remains an explicit dnSpy action.
+
+The import dialog supports selecting multiple `.ilpatch` files. Independent entries are combined into one preview and one undoable application batch, while the **Source** column keeps each method traceable to its original patch file. The batch composer intentionally refuses two selected files that target the same method identity: those patches may depend on application order, so silently flattening them against one pre-mutation baseline would be unsafe.
+
+### .dnspy change repository (foundation)
+
+ILPatch repository mode is intentionally closer to a small source-control repository than to a folder of DLL backups. A repository lives beside the tracked module:
+
+```text
+Game/
+├─ Assembly-CSharp.dll
+└─ .dnspy/
+   ├─ repo.json
+   ├─ base/
+   │  └─ Assembly-CSharp.dll
+   ├─ commits/
+   │  └─ <commit-id>.json
+   └─ patches/
+      └─ <commit-id>.ilpatch
+```
+
+The immutable `base/` DLL is the repository ROOT. Each commit stores a full **ROOT -> commit state** semantic patch plus parent/message/time/per-method summary metadata. This is deliberately snapshot-oriented in v1: every node can be exported independently from ROOT, while the parent chain still provides Git-like history and future room for staging/branching/deduplicated object storage.
+
+Before a commit is accepted, repository mode validates that the current working baseline is actually based on HEAD. Methods already changed in HEAD must appear with the HEAD patched hash; untouched methods must also match HEAD. Opening an older/root DLL and accidentally committing on top of it therefore fails closed instead of silently rewriting history.
+
+The repository scope is existing managed CIL method bodies. Structural method changes remain outside v1 and cause commit validation to fail.
+
+For history review, stored ROOT-to-commit snapshots are converted on demand into a **parent -> selected commit** semantic delta. This lets the same side-by-side diff viewer show what one commit actually changed without weakening the independent-export property of stored commits.
+
+Repository integrity is verified fail-closed. The immutable ROOT DLL is protected by both its original file SHA-256 and semantic module-state hash. Commit export recomputes the materialized module-state hash and must match the commit metadata before a DLL is written; a modified ROOT or corrupted patch/commit state therefore cannot silently produce a trusted export.
+
+### Side-by-side patch diff
+
+Tracked workspace changes and imported patch entries can be opened in a dedicated **Compare** window (or by double-clicking the row). The viewer keeps both sides vertically aligned in one grid and classifies each line as unchanged, added, removed, or modified.
+
+Two review projections are available:
+
+- **Normalized IL** — authoritative patch-oriented representation using stable instruction indices and normalized operands, plus locals/init-locals/exception-handler metadata.
+- **Decompiled C#** — review-only projection. The Base and Patched snapshots are materialized against the loaded target method and passed through dnSpy's C# decompiler, then line-diffed side-by-side. If a compatible target method is unavailable or an operand cannot be rebound safely, this mode reports the reason and leaves Normalized IL available.
+
+The C# diff deliberately never becomes the source of truth for apply/rebase decisions; decompiler output can change across decompiler versions even when IL semantics do not.
+
+### Recommended GUI workflow
+
+The Patch Workspace is split conceptually into two workflows:
+
+1. **Create a patch from edits** — load the original assembly, edit CIL using dnSpy as usual, review the tracked normalized IL changes in the upper grid, then choose **Export .ilpatch...**. **Revert Selected** restores one tracked method to the captured pre-edit baseline through dnSpy undo/redo.
+   If you already have an old original DLL and a separately saved dnSpy-modified DLL, choose **Recover from DLL Pair...** instead. The recovery path compares normalized existing CIL method bodies and writes a regular v1 `.ilpatch`; unsupported structural changes such as added/removed/renamed methods or metadata flag changes abort recovery instead of being silently omitted.
+2. **Replay a patch** — load the target/newer assembly, choose **Import .ilpatch...**, inspect each result and its normalized IL diff, resolve renamed/moved methods with **Use Candidate** only when appropriate, then use **Apply Safe**. If you load/replace/close assemblies after importing, choose **Refresh Preview** to rerun matching against the modules currently loaded in dnSpy without reselecting the patch file; manual target overrides are preserved. Apply Safe combines all current `Exact` and `BaseChanged + Clean` entries into one preflighted dnSpy undo command. Finally, save the modified module using dnSpy's normal save command.
+3. **Move the patch baseline forward** — after resolving a newer assembly, choose **Export Rebased...** to write a new definition for future versions without overwriting the source patch.
+
+The replay toolbar shows live counts such as `Apply Safe (5)`, and the status hint explains whether entries are ready, already present, or still need review. **Clear Import** only clears the imported preview, source labels, and manual target overrides; it never reverts changes that were already applied to the loaded assembly.
+
+
+
+**Apply Safe** is the batch convenience action. It revalidates the whole preview, materializes every `Exact` entry and every `BaseChanged + Clean` entry first, then submits all of them as one dnSpy undo command. `AlreadyApplied` / `RebasedApplied` entries are skipped and unresolved entries remain untouched in the preview. The separate **Apply Exact** and **Apply Clean Rebase** actions remain available when the user wants finer control.
+
+### Phase 4 - cross-version rebase
+Manual candidate selection is session-local until the user explicitly exports an updated definition. Choosing **Use Candidate** stores an in-memory override and re-evaluates Exact/Clean-Rebase safety checks against that method; it never mutates the imported source file in place.
+
+**Export Rebased .ilpatch...** creates a new patch document. Entries proven safe by Exact, Already/RebasedApplied round-trip recovery, or Clean three-way rebase are rewritten onto the current target/baseline. Conflicting or unsupported entries are preserved unchanged and reported to the user.
+
+For instruction-only patches, clean rebase also preserves a limited set of upstream method-body metadata changes. Existing local slots must remain an exact prefix of the current local list, so locals appended by the newer build are safe while removals/reorders/retypes remain blocked. Upstream exception handlers are taken from the current method and translated through the merged instruction map. The analyzer rejects a rebase up front if a preserved current branch/switch target or EH boundary points into a current instruction range that the patch will replace; this avoids presenting a false Clean preview that would only fail later during materialization. Patch-side local/EH/InitLocals edits remain unsupported.
+
+
+
+- [x] Structural method fingerprints (calls, fields, strings, constants, types, locals, opcode n-grams and EH shape).
+- [x] Advisory candidate scoring with score/margin display.
+- [x] Instruction alignment between old baseline, old patched and new current bodies.
+- [x] Three-way clean-hunk materialization and undoable application.
+- [x] Conflict preview and explicit manual candidate target selection.
+- [x] Detect `RebasedApplied` through a reversible normalized round-trip.
+- [x] Persist accepted target overrides and clean rebases into a newly exported `.ilpatch` while preserving unresolved entries.
+- [x] Preserve append-only upstream local-variable additions when existing slot indexes remain unchanged.
+- [x] Preserve upstream exception-handler changes when all current EH boundaries can be translated into the merged instruction body.
+- [ ] Rebase patch-side local/EH/InitLocals edits and incompatible upstream local-layout changes.
+
+### Phase 5 - headless application
+
+The headless path uses the same normalized CIL matcher, three-way rebase logic and dnlib body materializer as the GUI.
+
+```powershell
+# Apply one or more patches in order.
+ilpatch apply Assembly-CSharp.dll patches/001.ilpatch patches/002.ilpatch -o Assembly-CSharp.patched.dll
+
+# A directory expands to top-level *.ilpatch files in deterministic filename order.
+ilpatch apply Assembly-CSharp.dll patches/ -o Assembly-CSharp.patched.dll
+
+# Perform the complete matching/rebase/materialization pass without writing a DLL.
+ilpatch apply --dry-run Assembly-CSharp.dll patches/001.ilpatch patches/002.ilpatch
+
+# Write a machine-readable report for CI/MCP/batch tooling.
+ilpatch apply Assembly-CSharp.dll patches/001.ilpatch -o Assembly-CSharp.patched.dll --json ilpatch-report.json
+
+# Move one resolved patch definition onto a newer assembly baseline without modifying the DLL.
+ilpatch rebase Assembly-CSharp.new.dll patches/001.ilpatch -o patches/001.rebased.ilpatch --json rebase-report.json
+```
+
+The MVP is deliberately fail-closed:
+
+- `Exact` -> apply;
+- `AlreadyApplied` / `RebasedApplied` -> report present and continue;
+- `BaseChanged + Clean` -> three-way rebase and apply;
+- `Missing`, `Ambiguous`, `Incompatible`, rebase conflict or unsupported materialization -> fail the command;
+- a failed command never writes the output assembly;
+- the source DLL is never overwritten in place;
+- output/report paths are rejected if they would overwrite the input assembly or any source `.ilpatch` file, and output/report paths may not alias each other.
+
+Exit codes are `0` for success, `1` for usage/I/O/unexpected failures and `2` for unresolved patch entries.
+
+`--json <report.json>` writes a camelCase report without changing the normal console output. The report includes the input/output paths, dry-run state, success/exit code, whether an output assembly was written, aggregate applicable/already-present counts, and per-patch/per-entry actions (`Exact`, `CleanRebase`, `AlreadyPresent`, or `Unresolved`). Conflict reports are written before exiting with code 2 and explicitly report `outputWritten: false`.
+
+The CLI currently accepts already-resolved patch definitions. Structural candidates are printed for diagnosis but never auto-selected; use the dnSpy Patch Workspace to confirm a manual candidate and **Export Rebased .ilpatch...** before headless deployment.
+
+`ilpatch rebase` is the headless equivalent of exporting an updated definition for one patch file. It never edits the target assembly and never overwrites the source patch. Every entry must be safely updateable through Exact, Already/RebasedApplied recovery, or a Clean three-way rebase; otherwise the command exits with code 2 and writes no rebased patch. Its optional JSON report records per-entry import/rebase status and whether the output patch was written.
+
+- [x] Extract method-body materialization into pure dnlib core code.
+- [x] Add a pure headless apply engine shared by automation code.
+- [x] Add `Tools/ILPatch.Cli` with sequential multi-patch and `--dry-run` support.
+- [x] Accept patch directories and expand top-level `*.ilpatch` files in deterministic filename order.
+- [x] Add headless Exact / Clean-Rebase / fail-closed regression tests.
+- [x] Add a real CLI child-process / on-disk assembly integration test.
+- [x] Publish portable and Windows x64 CLI packages as CI artifacts.
+- [x] Wire release events to attach portable and Windows x64 CLI archives to GitHub Releases.
+- [x] Add machine-readable JSON report output for success and conflict paths.
+- [x] Add fail-closed `ilpatch rebase` for moving a resolved patch definition onto a newer assembly baseline.
+- [ ] Add explicit partial-apply mode only if a real workflow needs it.
+
+## Non-goals for the first version
+
+The first version intentionally supports CIL method-body changes only. Later versions can extend the change-set model for:
+
+- adding/removing methods, fields and types;
+- metadata/custom attribute changes;
+- compiler-generated async/iterator state-machine members;
+- resources;
+- native/mixed-mode method bodies.
+
+Keeping these out of v1 lets the method-body workflow become reliable before the patch format grows into a general assembly merge format.

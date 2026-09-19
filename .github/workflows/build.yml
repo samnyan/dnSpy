@@ -1,8 +1,10 @@
 name: GitHub CI
+
 on:
   push:
     branches:
       - master
+      - "feature/**"
   pull_request:
     branches:
       - master
@@ -11,14 +13,173 @@ on:
       - released
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  ilpatch-tests:
+    # Local feature PRs are already tested by the matching push run.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    name: ILPatch core tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6.0.0
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: ga
+
+      - name: Run ILPatch core tests
+        run: dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release
+
+      - name: Build ILPatch CLI
+        run: dotnet build Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release
+
+      - name: Smoke test ILPatch CLI
+        run: dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- --help
+
+      - name: Test ILPatch CLI process round trip
+        run: |
+          fixture="$RUNNER_TEMP/ilpatch-cli-integration"
+          mkdir -p "$fixture"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- create-cli-fixture "$fixture"
+
+          set +e
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            apply "$fixture/input.dll" "$fixture/patches" \
+            -o "$fixture/patches/001-change.ilpatch"
+          patch_collision_exit=$?
+
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            apply --dry-run "$fixture/input.dll" "$fixture/patches" \
+            --json "$fixture/input.dll"
+          report_collision_exit=$?
+          set -e
+
+          if [ "$patch_collision_exit" -ne 1 ]; then
+            echo "Expected patch-output collision exit code 1, got $patch_collision_exit" >&2
+            exit 1
+          fi
+          if [ "$report_collision_exit" -ne 1 ]; then
+            echo "Expected report-input collision exit code 1, got $report_collision_exit" >&2
+            exit 1
+          fi
+
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            apply "$fixture/input.dll" "$fixture/patches" \
+            -o "$fixture/output.dll" --json "$fixture/success-report.json"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-output "$fixture/output.dll"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-report "$fixture/success-report.json" true 0
+
+          set +e
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            apply "$fixture/conflict-input.dll" "$fixture/patches" \
+            -o "$fixture/conflict-output.dll" --json "$fixture/conflict-report.json"
+          conflict_exit=$?
+          set -e
+
+          if [ "$conflict_exit" -ne 2 ]; then
+            echo "Expected conflict exit code 2, got $conflict_exit" >&2
+            exit 1
+          fi
+          if [ -e "$fixture/conflict-output.dll" ]; then
+            echo "Conflict path must not write an output assembly." >&2
+            exit 1
+          fi
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-report "$fixture/conflict-report.json" false 2
+
+          set +e
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            rebase "$fixture/rebase-input.dll" "$fixture/patches/001-change.ilpatch" \
+            -o "$fixture/patches/001-change.ilpatch"
+          rebase_overwrite_exit=$?
+          set -e
+          if [ "$rebase_overwrite_exit" -ne 1 ]; then
+            echo "Expected source-patch overwrite protection exit code 1, got $rebase_overwrite_exit" >&2
+            exit 1
+          fi
+
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            rebase "$fixture/rebase-input.dll" "$fixture/patches/001-change.ilpatch" \
+            -o "$fixture/rebased.ilpatch" --json "$fixture/rebase-report.json"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-rebase-report "$fixture/rebase-report.json" true 0
+
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            apply "$fixture/rebase-input.dll" "$fixture/rebased.ilpatch" \
+            -o "$fixture/rebased-output.dll"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-rebased-output "$fixture/rebased-output.dll"
+
+          set +e
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            rebase "$fixture/conflict-input.dll" "$fixture/patches/001-change.ilpatch" \
+            -o "$fixture/conflict-rebased.ilpatch" --json "$fixture/conflict-rebase-report.json"
+          rebase_conflict_exit=$?
+          set -e
+
+          if [ "$rebase_conflict_exit" -ne 2 ]; then
+            echo "Expected rebase conflict exit code 2, got $rebase_conflict_exit" >&2
+            exit 1
+          fi
+          if [ -e "$fixture/conflict-rebased.ilpatch" ]; then
+            echo "Conflicting rebase must not write an output patch." >&2
+            exit 1
+          fi
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-rebase-report "$fixture/conflict-rebase-report.json" false 2
+
+      - name: Publish portable ILPatch CLI
+        run: dotnet publish Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release -p:UseAppHost=false -o "$RUNNER_TEMP/ilpatch-portable"
+
+      - name: Publish Windows x64 ILPatch CLI
+        run: dotnet publish Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release -r win-x64 --self-contained false -o "$RUNNER_TEMP/ilpatch-win-x64"
+
+      - name: Upload portable ILPatch CLI
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ilpatch-portable
+          path: ${{ runner.temp }}/ilpatch-portable
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 7
+
+      - name: Upload Windows x64 ILPatch CLI
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ilpatch-win-x64
+          path: ${{ runner.temp }}/ilpatch-win-x64
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 7
+
   build:
-    name: Build
+    # Feature branches in this repository are already covered by the push trigger.
+    # Keep pull_request builds for PRs coming from external forks without running
+    # the same matrix twice for our own feature/** branches.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    needs: ilpatch-tests
+    name: Build (${{ matrix.platform }})
     runs-on: windows-latest
+    timeout-minutes: 45
     defaults:
-        run:
-          shell: pwsh
+      run:
+        shell: pwsh
+
     strategy:
+      fail-fast: false
       matrix:
         platform: [netframework, net, net-x86, net-x64]
         include:
@@ -30,37 +191,77 @@ jobs:
             build-dir: net10.0-windows
           - platform: net-x86
             package-name: net-win32
-            build-dir: net10.0-windows\win-x86\publish
+            build-dir: net10.0-windows\\win-x86\\publish
           - platform: net-x64
             package-name: net-win64
-            build-dir: net10.0-windows\win-x64\publish
+            build-dir: net10.0-windows\\win-x64\\publish
 
     steps:
-      - uses: actions/checkout@v7.0.1
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
         with:
           submodules: true
 
-      - uses: actions/setup-dotnet@v6.0.0
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6.0.0
         with:
           dotnet-version: 10.0.x
           dotnet-quality: ga
 
-      - uses: microsoft/setup-msbuild@v3.0.0
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3.0.0
 
-      - name: Build dnSpy (${{matrix.platform}})
-        run: .\build.ps1 ${{matrix.platform}}
+      - name: Build dnSpy (${{ matrix.platform }})
+        run: .\\build.ps1 ${{ matrix.platform }}
 
-      - name: Create output directory
-        run: New-Item -ItemType Directory -Path C:\builtfiles\dnSpy-${{matrix.platform}} -Force > $null
-        continue-on-error: true
+      - name: Create artifact directory
+        run: New-Item -ItemType Directory -Path C:\\builtfiles\\dnSpy-${{ matrix.platform }} -Force > $null
 
-      - name:  Copy release files for upload
-        run: Copy-Item -Path dnSpy\dnSpy\bin\Release\${{matrix.build-dir}}\* -Destination C:\builtfiles\dnSpy-${{matrix.platform}} -Recurse
+      - name: Copy release files
+        run: Copy-Item -Path dnSpy\\dnSpy\\bin\\Release\\${{ matrix.build-dir }}\\* -Destination C:\\builtfiles\\dnSpy-${{ matrix.platform }} -Recurse
 
-      - uses: actions/upload-artifact@v7.0.1
-        if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7.0.1
         with:
-          name: dnSpy-${{matrix.package-name}}
-          path: C:\builtfiles\dnSpy-${{matrix.platform}}
+          name: dnSpy-${{ matrix.package-name }}
+          path: C:\\builtfiles\\dnSpy-${{ matrix.platform }}
           if-no-files-found: error
           compression-level: 9
+          retention-days: 7
+
+  release-ilpatch-cli:
+    if: github.event_name == 'release'
+    needs: [ilpatch-tests, build]
+    name: Attach ILPatch CLI release assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download portable ILPatch CLI
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: ilpatch-portable
+          path: release-assets/ilpatch-portable
+
+      - name: Download Windows x64 ILPatch CLI
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: ilpatch-win-x64
+          path: release-assets/ilpatch-win-x64
+
+      - name: Create release archives
+        run: |
+          cd release-assets
+          zip -r ilpatch-portable.zip ilpatch-portable
+          zip -r ilpatch-win-x64.zip ilpatch-win-x64
+
+      - name: Attach ILPatch CLI archives to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            release-assets/ilpatch-portable.zip \
+            release-assets/ilpatch-win-x64.zip \
+            --clobber
+

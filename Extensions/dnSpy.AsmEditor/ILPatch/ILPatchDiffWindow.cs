@@ -1,0 +1,287 @@
+/*
+    Copyright (C) 2014-2019 de4dot@gmail.com
+
+    This file is part of dnSpy
+
+    dnSpy is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+*/
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Media;
+using dnlib.DotNet;
+using dnSpy.Contracts.Decompiler;
+
+namespace dnSpy.AsmEditor.ILPatch {
+	enum ILPatchDiffViewMode {
+		NormalizedIL,
+		DecompiledCSharp,
+	}
+
+	static class ILPatchDiffTextProvider {
+		public static string[] GetNormalizedILLines(ILPatchMethodBodySnapshot snapshot) {
+			if (snapshot is null)
+				throw new ArgumentNullException(nameof(snapshot));
+
+			var lines = new List<string> {
+				$".initlocals {snapshot.InitLocals.ToString().ToLowerInvariant()}",
+				$".maxstack {snapshot.MaxStack}",
+			};
+			for (int i = 0; i < snapshot.Locals.Count; i++)
+				lines.Add($".local {i:D3} {snapshot.Locals[i]}");
+			for (int i = 0; i < snapshot.Instructions.Count; i++)
+				lines.Add($"{i:D4}: {snapshot.Instructions[i]}");
+			foreach (var handler in snapshot.ExceptionHandlers)
+				lines.Add(".eh " + handler.ToCanonicalString());
+			return lines.ToArray();
+		}
+
+		public static bool TryGetDecompiledCSharp(ILPatchMethodChange change, MethodDef? target,
+			IDecompilerService decompilerService, out string[] before, out string[] after, out string error) {
+			before = Array.Empty<string>();
+			after = Array.Empty<string>();
+			error = string.Empty;
+			if (change is null)
+				throw new ArgumentNullException(nameof(change));
+			if (decompilerService is null)
+				throw new ArgumentNullException(nameof(decompilerService));
+			if (target is null || target.Module is null || target.Body is null) {
+				error = "A compatible loaded target method is required for Decompiled C# mode. Normalized IL mode is still available.";
+				return false;
+			}
+
+			var materializer = new ILPatchBodyMaterializer(target.Module);
+			if (!materializer.TryCreate(target, change.BaseBody, out var baselineBody, out string baselineError) ||
+				baselineBody is null) {
+				error = "Could not materialize the baseline body for decompilation: " + baselineError;
+				return false;
+			}
+			if (!materializer.TryCreate(target, change.PatchedBody, out var patchedBody, out string patchedError) ||
+				patchedBody is null) {
+				error = "Could not materialize the patched body for decompilation: " + patchedError;
+				return false;
+			}
+
+			var decompiler = decompilerService.Find(DecompilerConstants.LANGUAGE_CSHARP_ILSPY) ??
+				decompilerService.FindOrDefault(DecompilerConstants.LANGUAGE_CSHARP);
+			var originalBody = target.Body;
+			try {
+				target.Body = baselineBody;
+				before = DecompileMethod(target, decompiler);
+				target.Body = patchedBody;
+				after = DecompileMethod(target, decompiler);
+				return true;
+			}
+			catch (Exception ex) {
+				error = "C# decompilation failed: " + ex.Message;
+				before = Array.Empty<string>();
+				after = Array.Empty<string>();
+				return false;
+			}
+			finally {
+				target.Body = originalBody;
+			}
+		}
+
+		static string[] DecompileMethod(MethodDef method, IDecompiler decompiler) {
+			var output = new StringBuilderDecompilerOutput();
+			var context = new DecompilationContext {
+				AsyncMethodBodyDecompilation = false,
+				IsBodyModified = candidate => ReferenceEquals(candidate, method),
+			};
+			decompiler.Decompile(method, output, context);
+			return SplitLines(output.GetText());
+		}
+
+		static string[] SplitLines(string text) {
+			var lines = (text ?? string.Empty)
+				.Replace("\r\n", "\n")
+				.Replace('\r', '\n')
+				.Split(new[] { '\n' }, StringSplitOptions.None);
+			if (lines.Length != 0 && lines[lines.Length - 1].Length == 0)
+				return lines.Take(lines.Length - 1).ToArray();
+			return lines;
+		}
+	}
+
+	sealed class ILPatchDiffWindow : Window {
+		readonly ILPatchMethodChange change;
+		readonly MethodDef? target;
+		readonly IDecompilerService decompilerService;
+		readonly ComboBox modeSelector;
+		readonly TextBlock statusText;
+		readonly DataGrid diffGrid;
+
+		public ILPatchDiffWindow(ILPatchMethodChange change, MethodDef? target,
+			IDecompilerService decompilerService) {
+			this.change = change ?? throw new ArgumentNullException(nameof(change));
+			this.target = target;
+			this.decompilerService = decompilerService ?? throw new ArgumentNullException(nameof(decompilerService));
+
+			Title = "IL Patch Diff — " + change.Target;
+			Width = 1400;
+			Height = 850;
+			MinWidth = 850;
+			MinHeight = 500;
+			WindowStartupLocation = WindowStartupLocation.CenterOwner;
+
+			var root = new Grid { Margin = new Thickness(8) };
+			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+			root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+			var toolbar = new DockPanel { LastChildFill = true };
+			modeSelector = new ComboBox {
+				MinWidth = 180,
+				Margin = new Thickness(0, 0, 8, 0),
+			};
+			modeSelector.Items.Add("Normalized IL");
+			modeSelector.Items.Add("Decompiled C#");
+			modeSelector.SelectedIndex = 0;
+			modeSelector.SelectionChanged += ModeSelector_SelectionChanged;
+			DockPanel.SetDock(modeSelector, Dock.Left);
+			toolbar.Children.Add(modeSelector);
+
+			var legend = new TextBlock {
+				Text = "  ~ modified    - removed    + added",
+				VerticalAlignment = VerticalAlignment.Center,
+			};
+			toolbar.Children.Add(legend);
+			Grid.SetRow(toolbar, 0);
+			root.Children.Add(toolbar);
+
+			statusText = new TextBlock {
+				TextWrapping = TextWrapping.Wrap,
+				Margin = new Thickness(0, 6, 0, 6),
+			};
+			Grid.SetRow(statusText, 1);
+			root.Children.Add(statusText);
+
+			diffGrid = new DataGrid {
+				AutoGenerateColumns = false,
+				CanUserAddRows = false,
+				CanUserDeleteRows = false,
+				IsReadOnly = true,
+				HeadersVisibility = DataGridHeadersVisibility.Column,
+				GridLinesVisibility = DataGridGridLinesVisibility.None,
+				SelectionMode = DataGridSelectionMode.Single,
+				FontFamily = new FontFamily("Consolas"),
+				HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+				VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+			};
+			diffGrid.Columns.Add(TextColumn("Old", nameof(DiffDisplayRow.LeftLine), 0.45));
+			diffGrid.Columns.Add(TextColumn("Original / Base", nameof(DiffDisplayRow.LeftText), 4));
+			diffGrid.Columns.Add(TextColumn("", nameof(DiffDisplayRow.Marker), 0.35));
+			diffGrid.Columns.Add(TextColumn("New", nameof(DiffDisplayRow.RightLine), 0.45));
+			diffGrid.Columns.Add(TextColumn("Patched", nameof(DiffDisplayRow.RightText), 4));
+			diffGrid.LoadingRow += DiffGrid_LoadingRow;
+			Grid.SetRow(diffGrid, 2);
+			root.Children.Add(diffGrid);
+
+			Content = root;
+			RefreshDiff();
+		}
+
+		static DataGridTextColumn TextColumn(string header, string property, double width) =>
+			new DataGridTextColumn {
+				Header = header,
+				Binding = new Binding(property),
+				Width = new DataGridLength(width, DataGridLengthUnitType.Star),
+			};
+
+		void ModeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e) {
+			if (IsLoaded || Content is not null)
+				RefreshDiff();
+		}
+
+		void RefreshDiff() {
+			ILPatchDiffViewMode mode = modeSelector.SelectedIndex == 1
+				? ILPatchDiffViewMode.DecompiledCSharp
+				: ILPatchDiffViewMode.NormalizedIL;
+
+			string[] left;
+			string[] right;
+			if (mode == ILPatchDiffViewMode.DecompiledCSharp) {
+				if (!ILPatchDiffTextProvider.TryGetDecompiledCSharp(change, target, decompilerService,
+					out left, out right, out string error)) {
+					statusText.Text = error;
+					diffGrid.ItemsSource = Array.Empty<DiffDisplayRow>();
+					return;
+				}
+				statusText.Text =
+					"Decompiled C# is a review-only projection produced by dnSpy's C# decompiler. " +
+					"The authoritative patch representation remains normalized IL.";
+			}
+			else {
+				left = ILPatchDiffTextProvider.GetNormalizedILLines(change.BaseBody);
+				right = ILPatchDiffTextProvider.GetNormalizedILLines(change.PatchedBody);
+				statusText.Text =
+					$"Normalized IL diff — base {ShortHash(change.BaseBody.CanonicalHash)} -> patched {ShortHash(change.PatchedBody.CanonicalHash)}.";
+			}
+
+			diffGrid.ItemsSource = ILPatchDiffEngine.Compare(left, right)
+				.Select(a => new DiffDisplayRow(a))
+				.ToArray();
+		}
+
+		void DiffGrid_LoadingRow(object sender, DataGridRowEventArgs e) {
+			if (!(e.Row.Item is DiffDisplayRow row))
+				return;
+			switch (row.Kind) {
+			case ILPatchDiffKind.Added:
+				e.Row.Background = new SolidColorBrush(Color.FromArgb(34, 40, 180, 80));
+				break;
+			case ILPatchDiffKind.Removed:
+				e.Row.Background = new SolidColorBrush(Color.FromArgb(34, 220, 70, 70));
+				break;
+			case ILPatchDiffKind.Modified:
+				e.Row.Background = new SolidColorBrush(Color.FromArgb(34, 220, 170, 50));
+				break;
+			default:
+				e.Row.ClearValue(BackgroundProperty);
+				break;
+			}
+		}
+
+		static string ShortHash(string? hash) =>
+			string.IsNullOrEmpty(hash) ? "—" : hash.Length <= 12 ? hash : hash.Substring(0, 12);
+
+		sealed class DiffDisplayRow {
+			public ILPatchDiffKind Kind { get; }
+			public string LeftLine { get; }
+			public string LeftText { get; }
+			public string Marker { get; }
+			public string RightLine { get; }
+			public string RightText { get; }
+
+			public DiffDisplayRow(ILPatchDiffRow row) {
+				Kind = row.Kind;
+				LeftLine = row.LeftLineNumber?.ToString() ?? string.Empty;
+				LeftText = row.LeftText;
+				RightLine = row.RightLineNumber?.ToString() ?? string.Empty;
+				RightText = row.RightText;
+				switch (row.Kind) {
+				case ILPatchDiffKind.Added:
+					Marker = "+";
+					break;
+				case ILPatchDiffKind.Removed:
+					Marker = "-";
+					break;
+				case ILPatchDiffKind.Modified:
+					Marker = "~";
+					break;
+				default:
+					Marker = string.Empty;
+					break;
+				}
+			}
+		}
+	}
+}
