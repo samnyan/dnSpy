@@ -122,6 +122,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			new Dictionary<ILPatchMethodChange, string>();
 		readonly TextBlock summaryText;
 		readonly TextBlock importSummaryText;
+		readonly TextBlock importHintText;
 		readonly TextBox diffText;
 		readonly DataGrid importGrid;
 		readonly ComboBox candidateSelector;
@@ -129,6 +130,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly Button clearCandidateButton;
 		readonly Button revertButton;
 		readonly Button importButton;
+		readonly Button refreshImportButton;
+		readonly Button clearImportButton;
 		readonly Button applyButton;
 		readonly Button rebaseButton;
 		readonly Button applySafeButton;
@@ -156,75 +159,54 @@ namespace dnSpy.AsmEditor.ILPatch {
 			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 			root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-			var header = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 6) };
-			var actionButtons = new StackPanel { Orientation = Orientation.Horizontal };
+			var workspaceHeader = new StackPanel { Margin = new Thickness(0, 0, 0, 6) };
+			var header = new DockPanel { LastChildFill = true };
+			var workspaceButtons = new StackPanel { Orientation = Orientation.Horizontal };
 			revertButton = new Button {
 				Content = "Revert Selected",
 				Padding = new Thickness(8, 2, 8, 2),
 				Margin = new Thickness(8, 0, 0, 0),
 				IsEnabled = false,
+				ToolTip = "Restore the selected tracked method to the baseline captured before the first edit. This is undoable.",
 			};
 			revertButton.Click += RevertButton_Click;
-			actionButtons.Children.Add(revertButton);
+			workspaceButtons.Children.Add(revertButton);
 
-			importButton = new Button {
-				Content = "Import .ilpatch...",
+			var recoverButton = new Button {
+				Content = "Recover from DLL Pair...",
 				Padding = new Thickness(8, 2, 8, 2),
 				Margin = new Thickness(8, 0, 0, 0),
+				ToolTip = "Create a .ilpatch by comparing an existing original DLL with a separately saved dnSpy-modified DLL.",
 			};
-			importButton.Click += ImportButton_Click;
-			actionButtons.Children.Add(importButton);
-
-			applyButton = new Button {
-				Content = "Apply Exact",
-				Padding = new Thickness(8, 2, 8, 2),
-				Margin = new Thickness(8, 0, 0, 0),
-				IsEnabled = false,
-			};
-			applyButton.Click += ApplyButton_Click;
-			actionButtons.Children.Add(applyButton);
-
-			rebaseButton = new Button {
-				Content = "Apply Clean Rebase",
-				Padding = new Thickness(8, 2, 8, 2),
-				Margin = new Thickness(8, 0, 0, 0),
-				IsEnabled = false,
-			};
-			rebaseButton.Click += RebaseButton_Click;
-			actionButtons.Children.Add(rebaseButton);
-
-			applySafeButton = new Button {
-				Content = "Apply Safe",
-				Padding = new Thickness(8, 2, 8, 2),
-				Margin = new Thickness(8, 0, 0, 0),
-				IsEnabled = false,
-			};
-			applySafeButton.Click += ApplySafeButton_Click;
-			actionButtons.Children.Add(applySafeButton);
-
-			exportRebasedButton = new Button {
-				Content = "Export Rebased .ilpatch...",
-				Padding = new Thickness(8, 2, 8, 2),
-				Margin = new Thickness(8, 0, 0, 0),
-				IsEnabled = false,
-			};
-			exportRebasedButton.Click += ExportRebasedButton_Click;
-			actionButtons.Children.Add(exportRebasedButton);
+			recoverButton.Click += RecoverPatchFromDllPairButton_Click;
+			workspaceButtons.Children.Add(recoverButton);
 
 			exportButton = new Button {
 				Content = "Export .ilpatch...",
 				Padding = new Thickness(8, 2, 8, 2),
 				Margin = new Thickness(8, 0, 0, 0),
+				ToolTip = "Export all effective tracked CIL method changes as a reusable .ilpatch file.",
 			};
 			exportButton.Click += ExportButton_Click;
-			actionButtons.Children.Add(exportButton);
-			DockPanel.SetDock(actionButtons, Dock.Right);
-			header.Children.Add(actionButtons);
+			workspaceButtons.Children.Add(exportButton);
+			DockPanel.SetDock(workspaceButtons, Dock.Right);
+			header.Children.Add(workspaceButtons);
 
-			summaryText = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
+			summaryText = new TextBlock {
+				VerticalAlignment = VerticalAlignment.Center,
+				FontWeight = FontWeights.SemiBold,
+			};
 			header.Children.Add(summaryText);
-			Grid.SetRow(header, 0);
-			root.Children.Add(header);
+			workspaceHeader.Children.Add(header);
+			workspaceHeader.Children.Add(new TextBlock {
+				Text = "Create workflow: edit CIL in dnSpy -> review tracked changes below -> Export .ilpatch. " +
+					"Existing modified DLLs can be migrated with Recover from DLL Pair. " +
+					"Replay workflow: open the target/newer DLL -> Import .ilpatch -> resolve target rows if needed -> Apply Safe -> save the module normally in dnSpy.",
+				TextWrapping = TextWrapping.Wrap,
+				Margin = new Thickness(0, 4, 0, 0),
+			});
+			Grid.SetRow(workspaceHeader, 0);
+			root.Children.Add(workspaceHeader);
 
 			var reviewGrid = new Grid();
 			reviewGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -256,13 +238,96 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Grid.SetRow(reviewGrid, 1);
 			root.Children.Add(reviewGrid);
 
+			var replayHeader = new StackPanel { Margin = new Thickness(0, 8, 0, 4) };
 			importSummaryText = new TextBlock {
-				Text = "No .ilpatch file imported for preview.",
+				Text = "Imported patch replay",
 				FontWeight = FontWeights.SemiBold,
-				Margin = new Thickness(0, 8, 0, 4),
 			};
-			Grid.SetRow(importSummaryText, 2);
-			root.Children.Add(importSummaryText);
+			replayHeader.Children.Add(importSummaryText);
+
+			importHintText = new TextBlock {
+				Text = "No .ilpatch imported. Load the target assembly in dnSpy first, then import the patch you want to replay.",
+				TextWrapping = TextWrapping.Wrap,
+				Margin = new Thickness(0, 4, 0, 0),
+			};
+			replayHeader.Children.Add(importHintText);
+
+			var replayButtons = new WrapPanel {
+				Orientation = Orientation.Horizontal,
+				Margin = new Thickness(0, 6, 0, 0),
+			};
+
+			importButton = new Button {
+				Content = "Import .ilpatch...",
+				Padding = new Thickness(8, 2, 8, 2),
+				ToolTip = "Import one or more independent .ilpatch files and preview how they match the currently loaded target assembly.",
+			};
+			importButton.Click += ImportButton_Click;
+			replayButtons.Children.Add(importButton);
+
+			clearImportButton = new Button {
+				Content = "Clear Import",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Clear only the current import preview and target overrides. Already applied edits are not reverted.",
+			};
+			clearImportButton.Click += ClearImportButton_Click;
+			replayButtons.Children.Add(clearImportButton);
+
+			refreshImportButton = new Button {
+				Content = "Refresh Preview",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Re-run matching and three-way analysis against the assemblies currently loaded in dnSpy. Manual target overrides are preserved.",
+			};
+			refreshImportButton.Click += RefreshImportButton_Click;
+			replayButtons.Children.Add(refreshImportButton);
+
+			applySafeButton = new Button {
+				Content = "Apply Safe",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(16, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Recommended replay action: preflight all Exact and Clean-Rebase entries, then apply them as one undoable dnSpy command.",
+			};
+			applySafeButton.Click += ApplySafeButton_Click;
+			replayButtons.Children.Add(applySafeButton);
+
+			applyButton = new Button {
+				Content = "Apply Exact",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Apply only entries whose current normalized body still exactly matches the stored baseline.",
+			};
+			applyButton.Click += ApplyButton_Click;
+			replayButtons.Children.Add(applyButton);
+
+			rebaseButton = new Button {
+				Content = "Apply Clean Rebase",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Apply only BaseChanged entries whose three-way IL rebase is proven Clean.",
+			};
+			rebaseButton.Click += RebaseButton_Click;
+			replayButtons.Children.Add(rebaseButton);
+
+			exportRebasedButton = new Button {
+				Content = "Export Rebased .ilpatch...",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(16, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Write a new patch definition based on the currently resolved target/new-version methods. The source patch file is not overwritten.",
+			};
+			exportRebasedButton.Click += ExportRebasedButton_Click;
+			replayButtons.Children.Add(exportRebasedButton);
+
+			replayHeader.Children.Add(replayButtons);
+			Grid.SetRow(replayHeader, 2);
+			root.Children.Add(replayHeader);
 
 			importGrid = CreateGrid();
 			importGrid.Columns.Add(CreateTextColumn("Status", nameof(ImportRow.Status), 0.8));
@@ -289,6 +354,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Padding = new Thickness(8, 2, 8, 2),
 				Margin = new Thickness(8, 0, 0, 0),
 				IsEnabled = false,
+				ToolTip = "Manually retarget only this patch entry to the selected structurally similar method. This is never done automatically.",
 			};
 			useCandidateButton.Click += UseCandidateButton_Click;
 			candidateButtons.Children.Add(useCandidateButton);
@@ -298,6 +364,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Padding = new Thickness(8, 2, 8, 2),
 				Margin = new Thickness(8, 0, 0, 0),
 				IsEnabled = false,
+				ToolTip = "Return this patch entry to exact-identity matching and remove its manual target override.",
 			};
 			clearCandidateButton.Click += ClearCandidateButton_Click;
 			candidateButtons.Children.Add(clearCandidateButton);
@@ -305,7 +372,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			candidateBar.Children.Add(candidateButtons);
 
 			var candidateLabel = new TextBlock {
-				Text = "Candidate target:",
+				Text = "Candidate target (manual override):",
 				VerticalAlignment = VerticalAlignment.Center,
 				Margin = new Thickness(0, 0, 8, 0),
 			};
@@ -437,6 +504,80 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 		}
 
+		void RecoverPatchFromDllPairButton_Click(object sender, RoutedEventArgs e) {
+			var originalDialog = new OpenFileDialog {
+				Title = "Select Original Assembly",
+				Filter = ".NET assemblies (*.dll;*.exe)|*.dll;*.exe|All files (*.*)|*.*",
+				CheckFileExists = true,
+				Multiselect = false,
+			};
+			if (originalDialog.ShowDialog(Window.GetWindow(this)) != true)
+				return;
+
+			var modifiedDialog = new OpenFileDialog {
+				Title = "Select Modified Assembly",
+				Filter = ".NET assemblies (*.dll;*.exe)|*.dll;*.exe|All files (*.*)|*.*",
+				CheckFileExists = true,
+				Multiselect = false,
+				InitialDirectory = Path.GetDirectoryName(originalDialog.FileName),
+			};
+			if (modifiedDialog.ShowDialog(Window.GetWindow(this)) != true)
+				return;
+
+			try {
+				string originalPath = Path.GetFullPath(originalDialog.FileName);
+				string modifiedPath = Path.GetFullPath(modifiedDialog.FileName);
+				if (StringComparer.OrdinalIgnoreCase.Equals(originalPath, modifiedPath)) {
+					MsgBox.Instance.Show("Original and modified assemblies must be different files.");
+					return;
+				}
+
+				using var original = ModuleDefMD.Load(originalPath);
+				using var modified = ModuleDefMD.Load(modifiedPath);
+				string defaultName = Path.GetFileNameWithoutExtension(originalPath) + ".recovered";
+				if (!ILPatchDocumentCreator.TryCreate(original, modified, defaultName,
+					out var document, out var report) || document is null) {
+					var message = new StringBuilder()
+						.Append("Cannot recover a v1 IL patch because unsupported structural changes were detected. ")
+						.Append("No patch file was written.")
+						.AppendLine()
+						.AppendLine();
+					foreach (string reason in report.UnsupportedReasons.Take(12))
+						message.Append("- ").AppendLine(reason);
+					if (report.UnsupportedReasons.Count > 12)
+						message.Append("- ... and ").Append(report.UnsupportedReasons.Count - 12).Append(" more");
+					MsgBox.Instance.Show(message.ToString());
+					return;
+				}
+
+				if (report.ChangedCount == 0) {
+					MsgBox.Instance.Show(
+						"No portable CIL method-body differences were found between the selected assemblies. " +
+						"MaxStack/MVID/metadata-token/offset noise is intentionally ignored.");
+					return;
+				}
+
+				var saveDialog = new SaveFileDialog {
+					Title = "Save Recovered IL Patch",
+					Filter = "IL Patch (*.ilpatch)|*.ilpatch|JSON (*.json)|*.json|All files (*.*)|*.*",
+					DefaultExt = ".ilpatch",
+					AddExtension = true,
+					OverwritePrompt = true,
+					FileName = defaultName + ".ilpatch",
+				};
+				if (saveDialog.ShowDialog(Window.GetWindow(this)) != true)
+					return;
+
+				ILPatchSerializer.Save(saveDialog.FileName, document);
+				MsgBox.Instance.Show(
+					$"Recovered {report.ChangedCount} changed CIL method(s) into:\n{saveDialog.FileName}\n\n" +
+					$"{report.UnchangedCount} unchanged method(s) were ignored.");
+			}
+			catch (Exception ex) {
+				MsgBox.Instance.Show(ex, "Could not recover an IL patch from the selected DLL pair.");
+			}
+		}
+
 		void ImportButton_Click(object sender, RoutedEventArgs e) {
 			var dialog = new OpenFileDialog {
 				Title = "Import IL Patch",
@@ -528,17 +669,50 @@ namespace dnSpy.AsmEditor.ILPatch {
 			importSummaryText.Text =
 				$"{sourceLabel}: {preview.Results.Count} method(s) — " +
 				$"{preview.Count(ILPatchImportStatus.Exact)} exact, " +
-				$"{preview.Count(ILPatchImportStatus.AlreadyApplied)} directly applied, " +
-				$"{preview.Count(ILPatchImportStatus.RebasedApplied)} rebased applied, " +
+				$"{preview.Count(ILPatchImportStatus.AlreadyApplied)} already present, " +
+				$"{preview.Count(ILPatchImportStatus.RebasedApplied)} rebased present, " +
 				$"{preview.Count(ILPatchImportStatus.BaseChanged)} base changed " +
 				$"(rebase: {cleanRebase} clean / {conflictRebase} conflict / {unsupportedRebase} unsupported), " +
 				$"{preview.Count(ILPatchImportStatus.Missing)} missing, " +
 				$"{preview.Count(ILPatchImportStatus.Ambiguous)} ambiguous, " +
 				$"{preview.Count(ILPatchImportStatus.Incompatible)} incompatible.";
-			applyButton.IsEnabled = preview.Count(ILPatchImportStatus.Exact) != 0;
+			int exactCount = preview.Count(ILPatchImportStatus.Exact);
+			int safeCount = exactCount + cleanRebase;
+			int updateableCount = preview.Results.Count(CanUpdatePatchDefinition);
+			int unresolvedCount = preview.Results.Count - updateableCount;
+			applyButton.IsEnabled = exactCount != 0;
 			rebaseButton.IsEnabled = cleanRebase != 0;
-			applySafeButton.IsEnabled = applyButton.IsEnabled || rebaseButton.IsEnabled;
-			exportRebasedButton.IsEnabled = preview.Results.Any(CanUpdatePatchDefinition);
+			applySafeButton.IsEnabled = safeCount != 0;
+			exportRebasedButton.IsEnabled = updateableCount != 0;
+			clearImportButton.IsEnabled = true;
+			refreshImportButton.IsEnabled = true;
+			applyButton.Content = $"Apply Exact ({exactCount})";
+			rebaseButton.Content = $"Apply Clean Rebase ({cleanRebase})";
+			applySafeButton.Content = $"Apply Safe ({safeCount})";
+			exportRebasedButton.Content = $"Export Rebased ({updateableCount})...";
+			if (preview.Results.Count == 0) {
+				importHintText.Text = "This patch document contains no method entries.";
+			}
+			else if (unresolvedCount == 0 && safeCount == 0) {
+				importHintText.Text =
+					"All imported entries are already present on the loaded target. No apply action is needed. " +
+					"You can Export Rebased to move the patch baseline forward.";
+			}
+			else if (unresolvedCount == 0) {
+				importHintText.Text =
+					$"Recommended next step: Apply Safe ({safeCount}). All entries are resolved; " +
+					"after applying, save the target module using dnSpy's normal Save Module command.";
+			}
+			else if (safeCount != 0) {
+				importHintText.Text =
+					$"{safeCount} entr{(safeCount == 1 ? "y is" : "ies are")} safe to apply now; {unresolvedCount} still need review. " +
+					"Select unresolved rows below and choose a compatible candidate when appropriate. Apply Safe never touches unresolved rows.";
+			}
+			else {
+				importHintText.Text =
+					$"No entries are currently safe to apply. Review the {unresolvedCount} unresolved row(s), inspect the IL diff/candidates, " +
+					"and use Use Candidate only when the target is semantically the same method.";
+			}
 			var selectedRow = selectedPatchId is null
 				? null
 				: imports.FirstOrDefault(a => StringComparer.Ordinal.Equals(a.Result.Patch.Id, selectedPatchId));
@@ -552,6 +726,37 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var modules = documentService.GetDocuments().GetModules<ModuleDef>().ToArray();
 			var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
 			ShowImportPreview(importedSourceLabel, importedDefaultBaseName, preview);
+		}
+
+		void RefreshImportButton_Click(object sender, RoutedEventArgs e) =>
+			RefreshImportedPreview();
+
+		void ClearImportButton_Click(object sender, RoutedEventArgs e) {
+			importedPreview = null;
+			importedSourceLabel = null;
+			importedDefaultBaseName = null;
+			targetOverrides.Clear();
+			importedPatchSources.Clear();
+			imports.Clear();
+			importGrid.SelectedItem = null;
+			candidateSelector.Items.Clear();
+			candidateSelector.IsEnabled = false;
+			useCandidateButton.IsEnabled = false;
+			clearCandidateButton.IsEnabled = false;
+			clearImportButton.IsEnabled = false;
+			refreshImportButton.IsEnabled = false;
+			applyButton.IsEnabled = false;
+			rebaseButton.IsEnabled = false;
+			applySafeButton.IsEnabled = false;
+			exportRebasedButton.IsEnabled = false;
+			applyButton.Content = "Apply Exact";
+			rebaseButton.Content = "Apply Clean Rebase";
+			applySafeButton.Content = "Apply Safe";
+			exportRebasedButton.Content = "Export Rebased .ilpatch...";
+			importSummaryText.Text = "Imported patch replay";
+			importHintText.Text = "No .ilpatch imported. Load the target assembly in dnSpy first, then import the patch you want to replay.";
+			var selectedChange = ChangesGrid.SelectedItem as ChangeRow;
+			UpdateDiff(selectedChange);
 		}
 
 		void ApplyButton_Click(object sender, RoutedEventArgs e) =>

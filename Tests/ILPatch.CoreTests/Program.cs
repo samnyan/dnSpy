@@ -36,6 +36,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(BatchComposerCombinesIndependentTargets), BatchComposerCombinesIndependentTargets),
 				(nameof(BatchComposerRejectsDuplicatePatchIds), BatchComposerRejectsDuplicatePatchIds),
 				(nameof(BatchComposerRejectsOverlappingTargets), BatchComposerRejectsOverlappingTargets),
+				(nameof(DocumentCreatorCapturesMethodBodyChange), DocumentCreatorCapturesMethodBodyChange),
+				(nameof(DocumentCreatorIgnoresMaxStackNoise), DocumentCreatorIgnoresMaxStackNoise),
+				(nameof(DocumentCreatorRejectsAddedMethod), DocumentCreatorRejectsAddedMethod),
+				(nameof(DocumentCreatorRejectsMethodFlagChange), DocumentCreatorRejectsMethodFlagChange),
+				(nameof(DocumentCreatorDiskRoundTripCapturesBodyChange), DocumentCreatorDiskRoundTripCapturesBodyChange),
 			};
 
 			int failed = 0;
@@ -729,6 +734,100 @@ namespace dnSpy.AsmEditor.ILPatch {
 				"Multiple selected files targeting the same method must not be combined.");
 			True(error.Contains("apply/rebase them sequentially", StringComparison.Ordinal),
 				"Overlapping-target error should direct the user to sequential application.");
+		}
+
+		static void DocumentCreatorCapturesMethodBodyChange() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var modified = CreateNamedIntMethod("Run", 2);
+
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "created",
+				out var document, out var report), string.Join(" ", report.UnsupportedReasons));
+			NotNull(document, "Created patch document was null.");
+			Equal(1, report.ChangedCount, "One changed CIL method should be captured.");
+			Equal(0, report.UnsupportedCount, "Simple body edit should be supported.");
+			Equal(1, document!.Methods.Count, "Created document should contain one method patch.");
+			Equal(1L, document.Methods[0].BaseBody.Instructions[0].Operand.IntegerValue,
+				"Created baseline should come from the original assembly.");
+			Equal(2L, document.Methods[0].PatchedBody.Instructions[0].Operand.IntegerValue,
+				"Created patched body should come from the modified assembly.");
+		}
+
+		static void DocumentCreatorIgnoresMaxStackNoise() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var modified = CreateNamedIntMethod("Run", 1);
+			original.Body!.MaxStack = 1;
+			modified.Body!.MaxStack = 32;
+
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "noise",
+				out var document, out var report), string.Join(" ", report.UnsupportedReasons));
+			NotNull(document, "Created patch document was null.");
+			Equal(0, report.ChangedCount, "MaxStack-only differences must not create a portable patch.");
+			Equal(1, report.UnchangedCount, "Method should be counted as semantically unchanged.");
+			Equal(0, document!.Methods.Count, "No patch entry should be emitted for MaxStack-only noise.");
+		}
+
+		static void DocumentCreatorRejectsAddedMethod() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var modified = CreateNamedIntMethod("Run", 1);
+			var type = modified.DeclaringType!;
+			var added = new MethodDefUser("Added", MethodSig.CreateStatic(modified.Module.CorLibTypes.Void)) {
+				Body = new dnlib.DotNet.Emit.CilBody(),
+			};
+			added.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
+			type.Methods.Add(added);
+
+			False(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "unsupported",
+				out var document, out var report),
+				"Added methods are outside the v1 method-body patch format and must fail closed.");
+			True(document is null, "Failed creation must not return a partial patch document.");
+			True(report.UnsupportedReasons.Any(a => a.Contains("added method", StringComparison.OrdinalIgnoreCase)),
+				"Create report should identify the added method.");
+		}
+
+		static void DocumentCreatorDiskRoundTripCapturesBodyChange() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-create-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string originalPath = Path.Combine(directory, "original.dll");
+				string modifiedPath = Path.Combine(directory, "modified.dll");
+
+				var originalMethod = CreateNamedIntMethod("Run", 1);
+				originalMethod.Module.Write(originalPath);
+				var modifiedMethod = CreateNamedIntMethod("Run", 2);
+				modifiedMethod.Module.Write(modifiedPath);
+
+				using var original = ModuleDefMD.Load(originalPath);
+				using var modified = ModuleDefMD.Load(modifiedPath);
+				True(ILPatchDocumentCreator.TryCreate(original, modified, "disk-recovery",
+					out var document, out var report), string.Join(" ", report.UnsupportedReasons));
+				NotNull(document, "Disk recovery should produce a patch document.");
+				Equal(1, report.ChangedCount,
+					"Disk recovery should capture the one semantic method-body change despite independent module metadata.");
+				Equal(0, report.UnsupportedCount,
+					"Independent on-disk MVID/token/RID allocation must not be treated as unsupported.");
+				Equal(1, document!.Methods.Count,
+					"Disk recovery should emit exactly one method patch.");
+				Equal(1L, document.Methods[0].BaseBody.Instructions[0].Operand.IntegerValue,
+					"Recovered disk baseline must contain the original IL.");
+				Equal(2L, document.Methods[0].PatchedBody.Instructions[0].Operand.IntegerValue,
+					"Recovered disk patched body must contain the modified IL.");
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+		static void DocumentCreatorRejectsMethodFlagChange() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var modified = CreateNamedIntMethod("Run", 1);
+			modified.Attributes |= MethodAttributes.Public;
+
+			False(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "unsupported",
+				out _, out var report),
+				"Method metadata flag changes must not be silently omitted.");
+			True(report.UnsupportedReasons.Any(a => a.Contains("metadata flags changed", StringComparison.Ordinal)),
+				"Create report should identify the method flag change.");
 		}
 
 		static ILPatchMethodChange CreateRealBodyConstantPatch(MethodDef target, int patchedValue) {

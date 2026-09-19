@@ -175,6 +175,19 @@ The first UI can show normalized IL. A decompiled C# diff can be added as a conv
 
 The import dialog supports selecting multiple `.ilpatch` files. Independent entries are combined into one preview and one undoable application batch, while the **Source** column keeps each method traceable to its original patch file. The batch composer intentionally refuses two selected files that target the same method identity: those patches may depend on application order, so silently flattening them against one pre-mutation baseline would be unsafe.
 
+### Recommended GUI workflow
+
+The Patch Workspace is split conceptually into two workflows:
+
+1. **Create a patch from edits** — load the original assembly, edit CIL using dnSpy as usual, review the tracked normalized IL changes in the upper grid, then choose **Export .ilpatch...**. **Revert Selected** restores one tracked method to the captured pre-edit baseline through dnSpy undo/redo.
+   If you already have an old original DLL and a separately saved dnSpy-modified DLL, choose **Recover from DLL Pair...** instead. The recovery path compares normalized existing CIL method bodies and writes a regular v1 `.ilpatch`; unsupported structural changes such as added/removed/renamed methods or metadata flag changes abort recovery instead of being silently omitted.
+2. **Replay a patch** — load the target/newer assembly, choose **Import .ilpatch...**, inspect each result and its normalized IL diff, resolve renamed/moved methods with **Use Candidate** only when appropriate, then use **Apply Safe**. If you load/replace/close assemblies after importing, choose **Refresh Preview** to rerun matching against the modules currently loaded in dnSpy without reselecting the patch file; manual target overrides are preserved. Apply Safe combines all current `Exact` and `BaseChanged + Clean` entries into one preflighted dnSpy undo command. Finally, save the modified module using dnSpy's normal save command.
+3. **Move the patch baseline forward** — after resolving a newer assembly, choose **Export Rebased...** to write a new definition for future versions without overwriting the source patch.
+
+The replay toolbar shows live counts such as `Apply Safe (5)`, and the status hint explains whether entries are ready, already present, or still need review. **Clear Import** only clears the imported preview, source labels, and manual target overrides; it never reverts changes that were already applied to the loaded assembly.
+
+
+
 **Apply Safe** is the batch convenience action. It revalidates the whole preview, materializes every `Exact` entry and every `BaseChanged + Clean` entry first, then submits all of them as one dnSpy undo command. `AlreadyApplied` / `RebasedApplied` entries are skipped and unresolved entries remain untouched in the preview. The separate **Apply Exact** and **Apply Clean Rebase** actions remain available when the user wants finer control.
 
 ### Phase 4 - cross-version rebase
