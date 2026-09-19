@@ -128,7 +128,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				patched.Method = identity;
 				created.Methods.Add(new ILPatchMethodChange {
 					Target = identity,
-					BaseModuleMvid = original.Mvid,
+					BaseModuleMvid = original.Mvid ?? Guid.Empty,
 					BaseBody = baseline,
 					PatchedBody = patched,
 				});
