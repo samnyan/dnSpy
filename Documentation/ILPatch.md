@@ -175,6 +175,29 @@ The first UI can show normalized IL. A decompiled C# diff can be added as a conv
 
 The import dialog supports selecting multiple `.ilpatch` files. Independent entries are combined into one preview and one undoable application batch, while the **Source** column keeps each method traceable to its original patch file. The batch composer intentionally refuses two selected files that target the same method identity: those patches may depend on application order, so silently flattening them against one pre-mutation baseline would be unsafe.
 
+### .dnspy change repository (foundation)
+
+ILPatch repository mode is intentionally closer to a small source-control repository than to a folder of DLL backups. A repository lives beside the tracked module:
+
+```text
+Game/
+├─ Assembly-CSharp.dll
+└─ .dnspy/
+   ├─ repo.json
+   ├─ base/
+   │  └─ Assembly-CSharp.dll
+   ├─ commits/
+   │  └─ <commit-id>.json
+   └─ patches/
+      └─ <commit-id>.ilpatch
+```
+
+The immutable `base/` DLL is the repository ROOT. Each commit stores a full **ROOT -> commit state** semantic patch plus parent/message/time/per-method summary metadata. This is deliberately snapshot-oriented in v1: every node can be exported independently from ROOT, while the parent chain still provides Git-like history and future room for staging/branching/deduplicated object storage.
+
+Before a commit is accepted, repository mode validates that the current working baseline is actually based on HEAD. Methods already changed in HEAD must appear with the HEAD patched hash; untouched methods must also match HEAD. Opening an older/root DLL and accidentally committing on top of it therefore fails closed instead of silently rewriting history.
+
+The repository scope is existing managed CIL method bodies. Structural method changes remain outside v1 and cause commit validation to fail.
+
 ### Side-by-side patch diff
 
 Tracked workspace changes and imported patch entries can be opened in a dedicated **Compare** window (or by double-clicking the row). The viewer keeps both sides vertically aligned in one grid and classifies each line as unchanged, added, removed, or modified.

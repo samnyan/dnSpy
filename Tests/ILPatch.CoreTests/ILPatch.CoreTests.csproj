@@ -28,6 +28,7 @@
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchBatchComposer.cs" Link="Core\ILPatchBatchComposer.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchDocumentCreator.cs" Link="Core\ILPatchDocumentCreator.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchDiffEngine.cs" Link="Core\ILPatchDiffEngine.cs" />
+    <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchRepository.cs" Link="Core\ILPatchRepository.cs" />
   </ItemGroup>
 
 </Project>

@@ -44,6 +44,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(DiffEngineAlignsModifiedLines), DiffEngineAlignsModifiedLines),
 				(nameof(DiffEngineTracksAddedAndRemovedLines), DiffEngineTracksAddedAndRemovedLines),
 				(nameof(DiffEngineKeepsStableAnchors), DiffEngineKeepsStableAnchors),
+				(nameof(RepositoryCommitHistoryAndExportRoundTrip), RepositoryCommitHistoryAndExportRoundTrip),
+				(nameof(RepositoryRejectsDivergedWorkingTree), RepositoryRejectsDivergedWorkingTree),
+				(nameof(RepositoryCommitCanRevertParentChange), RepositoryCommitCanRevertParentChange),
 			};
 
 			int failed = 0;
@@ -787,6 +790,133 @@ namespace dnSpy.AsmEditor.ILPatch {
 				"Create report should identify the added method.");
 		}
 
+		static void RepositoryCommitHistoryAndExportRoundTrip() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+				True(File.Exists(Path.Combine(directory, ".dnspy", "repo.json")),
+					"Repository initialization should create .dnspy/repo.json.");
+				True(File.Exists(repository.RootModulePath),
+					"Repository initialization should preserve an immutable root DLL.");
+
+				using (var working = ModuleDefMD.Load(workingPath)) {
+					var first = FindFixtureMethod(working, "First");
+					var change = CreateWorkingConstantChange(first, 2);
+					var commit = repository.Commit(working, new[] { change }, "change first");
+					Equal(1, commit.Changes.Count, "First repository commit should report one changed method.");
+					Equal(ILPatchRepositoryMethodChangeKind.AddedChange, commit.Changes[0].Kind,
+						"First change from root should be AddedChange.");
+				}
+
+				string firstExport = Path.Combine(directory, "first-export.dll");
+				repository.Export(repository.Metadata.HeadCommitId, firstExport);
+				VerifyFixtureConstants(firstExport, 2, 10);
+				// Use the exported HEAD as the next working DLL, just like Save/Export Commit in the GUI.
+				File.Copy(firstExport, workingPath, true);
+
+				var reopened = ILPatchRepository.OpenForModule(workingPath);
+				string firstCommitId = reopened.Metadata.HeadCommitId!;
+				using (var working = ModuleDefMD.Load(workingPath)) {
+					var second = FindFixtureMethod(working, "Second");
+					var change = CreateWorkingConstantChange(second, 20);
+					var commit = reopened.Commit(working, new[] { change }, "change second");
+					Equal(firstCommitId, commit.ParentId, "Second commit should reference the previous HEAD.");
+				}
+
+				var history = reopened.GetHistory();
+				Equal(2, history.Count, "Repository history should survive reopening and contain both commits.");
+				Equal("change second", history[0].Message, "History should be newest-first.");
+				Equal("change first", history[1].Message, "Older commit should remain reachable.");
+
+				string rootExport = Path.Combine(directory, "root-export.dll");
+				string oldExport = Path.Combine(directory, "old-export.dll");
+				string headExport = Path.Combine(directory, "head-export.dll");
+				reopened.Export(null, rootExport);
+				reopened.Export(history[1].Id, oldExport);
+				reopened.Export(history[0].Id, headExport);
+				VerifyFixtureConstants(rootExport, 1, 10);
+				VerifyFixtureConstants(oldExport, 2, 10);
+				VerifyFixtureConstants(headExport, 2, 20);
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+		static void RepositoryRejectsDivergedWorkingTree() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-diverged-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+				using (var working = ModuleDefMD.Load(workingPath)) {
+					var change = CreateWorkingConstantChange(FindFixtureMethod(working, "First"), 2);
+					repository.Commit(working, new[] { change }, "head changes first");
+				}
+
+				// Deliberately reopen the immutable root instead of HEAD, then edit a different method.
+				File.Copy(repository.RootModulePath, workingPath, true);
+				using var diverged = ModuleDefMD.Load(workingPath);
+				var secondChange = CreateWorkingConstantChange(FindFixtureMethod(diverged, "Second"), 20);
+				False(repository.TryValidateWorkingBase(diverged, new[] { secondChange }, out string error),
+					"A working tree based on ROOT must not be accepted when HEAD already changed another method.");
+				True(error.Contains("not based on repository HEAD", StringComparison.Ordinal),
+					"Divergence error should explain that the loaded DLL is not based on HEAD.");
+				bool threw = false;
+				try {
+					repository.Commit(diverged, new[] { secondChange }, "should fail");
+				}
+				catch (InvalidOperationException) {
+					threw = true;
+				}
+				True(threw, "Commit itself must fail closed on a diverged working tree.");
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+		static void RepositoryCommitCanRevertParentChange() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-revert-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+				using (var working = ModuleDefMD.Load(workingPath)) {
+					var change = CreateWorkingConstantChange(FindFixtureMethod(working, "First"), 2);
+					repository.Commit(working, new[] { change }, "change first");
+				}
+				string headPath = Path.Combine(directory, "head.dll");
+				repository.Export(repository.Metadata.HeadCommitId, headPath);
+				File.Copy(headPath, workingPath, true);
+
+				using (var working = ModuleDefMD.Load(workingPath)) {
+					var revert = CreateWorkingConstantChange(FindFixtureMethod(working, "First"), 1);
+					var commit = repository.Commit(working, new[] { revert }, "revert first");
+					Equal(1, commit.Changes.Count, "Revert commit should contain one method summary.");
+					Equal(ILPatchRepositoryMethodChangeKind.Reverted, commit.Changes[0].Kind,
+						"Returning a parent change to ROOT should be classified as Reverted.");
+				}
+
+				string exported = Path.Combine(directory, "reverted.dll");
+				repository.Export(repository.Metadata.HeadCommitId, exported);
+				VerifyFixtureConstants(exported, 1, 10);
+				Equal(0, repository.LoadCommitPatch(repository.Metadata.HeadCommitId!).Methods.Count,
+					"Full-state patch after reverting the only change should be empty.");
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
 		static void DiffEngineAlignsModifiedLines() {
 			var rows = ILPatchDiffEngine.Compare(
 				new[] { "a", "old", "z" },
@@ -884,6 +1014,52 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var assembly = new AssemblyDefUser("Assembly-CSharp", new Version(1, 0, 0, 0));
 			assembly.Modules.Add(module);
 			return module;
+		}
+
+		static ModuleDef CreateRepositoryFixtureModule(int firstValue, int secondValue) {
+			var module = CreateModule();
+			var type = new TypeDefUser("Tests", "RepositoryFixture", module.CorLibTypes.Object.TypeDefOrRef);
+			module.Types.Add(type);
+			AddConstantMethod(type, "First", firstValue);
+			AddConstantMethod(type, "Second", secondValue);
+			return module;
+		}
+
+		static void AddConstantMethod(TypeDef type, string name, int value) {
+			var method = new MethodDefUser(name, MethodSig.CreateStatic(type.Module.CorLibTypes.Int32)) {
+				Body = new dnlib.DotNet.Emit.CilBody(),
+			};
+			method.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.CreateLdcI4(value));
+			method.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
+			type.Methods.Add(method);
+		}
+
+		static MethodDef FindFixtureMethod(ModuleDef module, string name) =>
+			module.GetTypes().SelectMany(a => a.Methods)
+				.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, name));
+
+		static ILPatchMethodChange CreateWorkingConstantChange(MethodDef method, int newValue) {
+			var baseline = CilNormalizer.CreateSnapshot(method);
+			baseline.CanonicalHash = ILPatchBodyHasher.Compute(baseline);
+			method.Body!.Instructions[0] = dnlib.DotNet.Emit.Instruction.CreateLdcI4(newValue);
+			var patched = CilNormalizer.CreateSnapshot(method);
+			patched.CanonicalHash = ILPatchBodyHasher.Compute(patched);
+			return new ILPatchMethodChange {
+				Target = ILPatchMethodIdentity.Create(method),
+				BaseModuleMvid = method.Module?.Mvid ?? Guid.Empty,
+				BaseBody = baseline,
+				PatchedBody = patched,
+			};
+		}
+
+		static void VerifyFixtureConstants(string path, int first, int second) {
+			using var module = ModuleDefMD.Load(path);
+			var firstMethod = FindFixtureMethod(module, "First");
+			var secondMethod = FindFixtureMethod(module, "Second");
+			Equal((long)first, CilNormalizer.CreateSnapshot(firstMethod).Instructions[0].Operand.IntegerValue,
+				"Unexpected First() constant.");
+			Equal((long)second, CilNormalizer.CreateSnapshot(secondMethod).Instructions[0].Operand.IntegerValue,
+				"Unexpected Second() constant.");
 		}
 
 		static MethodDef CreateNamedIntMethod(string name, int constant) {
