@@ -198,6 +198,10 @@ Before a commit is accepted, repository mode validates that the current working 
 
 The repository scope is existing managed CIL method bodies. Structural method changes remain outside v1 and cause commit validation to fail.
 
+For history review, stored ROOT-to-commit snapshots are converted on demand into a **parent -> selected commit** semantic delta. This lets the same side-by-side diff viewer show what one commit actually changed without weakening the independent-export property of stored commits.
+
+Repository integrity is verified fail-closed. The immutable ROOT DLL is protected by both its original file SHA-256 and semantic module-state hash. Commit export recomputes the materialized module-state hash and must match the commit metadata before a DLL is written; a modified ROOT or corrupted patch/commit state therefore cannot silently produce a trusted export.
+
 ### Side-by-side patch diff
 
 Tracked workspace changes and imported patch entries can be opened in a dedicated **Compare** window (or by double-clicking the row). The viewer keeps both sides vertically aligned in one grid and classifies each line as unchanged, added, removed, or modified.

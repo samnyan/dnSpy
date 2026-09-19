@@ -47,6 +47,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(RepositoryCommitHistoryAndExportRoundTrip), RepositoryCommitHistoryAndExportRoundTrip),
 				(nameof(RepositoryRejectsDivergedWorkingTree), RepositoryRejectsDivergedWorkingTree),
 				(nameof(RepositoryCommitCanRevertParentChange), RepositoryCommitCanRevertParentChange),
+				(nameof(RepositoryCommitDeltaUsesParentState), RepositoryCommitDeltaUsesParentState),
+				(nameof(RepositoryDetectsTamperedRoot), RepositoryDetectsTamperedRoot),
 			};
 
 			int failed = 0;
@@ -875,6 +877,64 @@ namespace dnSpy.AsmEditor.ILPatch {
 					threw = true;
 				}
 				True(threw, "Commit itself must fail closed on a diverged working tree.");
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+		static void RepositoryDetectsTamperedRoot() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-tamper-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+				CreateRepositoryFixtureModule(99, 10).Write(repository.RootModulePath);
+
+				bool threw = false;
+				try {
+					ILPatchRepository.OpenForModule(workingPath);
+				}
+				catch (InvalidDataException) {
+					threw = true;
+				}
+				True(threw, "Opening a repository must detect a modified immutable ROOT assembly.");
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+		static void RepositoryCommitDeltaUsesParentState() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-delta-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+				using (var working = ModuleDefMD.Load(workingPath)) {
+					var change = CreateWorkingConstantChange(FindFixtureMethod(working, "First"), 2);
+					repository.Commit(working, new[] { change }, "first");
+				}
+				string firstHead = Path.Combine(directory, "first-head.dll");
+				repository.Export(repository.Metadata.HeadCommitId, firstHead);
+				File.Copy(firstHead, workingPath, true);
+
+				string secondId;
+				using (var working = ModuleDefMD.Load(workingPath)) {
+					var change = CreateWorkingConstantChange(FindFixtureMethod(working, "First"), 3);
+					secondId = repository.Commit(working, new[] { change }, "second").Id;
+				}
+
+				var delta = repository.CreateCommitDelta(secondId);
+				Equal(1, delta.Methods.Count, "Second commit delta should contain the parent-relative changed method.");
+				Equal(2L, delta.Methods[0].BaseBody.Instructions[0].Operand.IntegerValue,
+					"History diff must use the parent commit state as its base, not ROOT.");
+				Equal(3L, delta.Methods[0].PatchedBody.Instructions[0].Operand.IntegerValue,
+					"History diff patched side must use the selected commit state.");
 			}
 			finally {
 				if (Directory.Exists(directory))

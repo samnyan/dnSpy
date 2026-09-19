@@ -160,7 +160,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (!StringComparer.OrdinalIgnoreCase.Equals(metadata.ModuleFileName, Path.GetFileName(modulePath)))
 				throw new InvalidOperationException(
 					$"The .dnspy repository tracks '{metadata.ModuleFileName}', not '{Path.GetFileName(modulePath)}'.");
-			return new ILPatchRepository(repositoryPath, metadata);
+			var repository = new ILPatchRepository(repositoryPath, metadata);
+			repository.ValidateRootIntegrity();
+			return repository;
 		}
 
 		public static bool ExistsForModule(string modulePath) {
@@ -193,6 +195,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		public ILPatchRepositoryCommit Commit(ModuleDef currentModule,
 			IReadOnlyList<ILPatchMethodChange> workingChanges, string message) {
+			ValidateRootIntegrity();
 			if (currentModule is null)
 				throw new ArgumentNullException(nameof(currentModule));
 			if (workingChanges is null)
@@ -271,6 +274,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public bool TryValidateWorkingBase(ModuleDef currentModule,
 			IReadOnlyList<ILPatchMethodChange> workingChanges, out string error) {
 			try {
+				ValidateRootIntegrity();
 				using var rootModule = ModuleDefMD.Load(RootModulePath);
 				var rootMethods = BuildMethodMap(rootModule);
 				var currentMethods = BuildMethodMap(currentModule);
@@ -293,6 +297,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		public void Export(string? commitId, string outputPath) {
+			ValidateRootIntegrity();
 			outputPath = Path.GetFullPath(outputPath ?? throw new ArgumentNullException(nameof(outputPath)));
 			if (StringComparer.OrdinalIgnoreCase.Equals(outputPath, RootModulePath))
 				throw new InvalidOperationException("Export path must not overwrite the repository root assembly.");
@@ -305,6 +310,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return;
 			}
 
+			var commit = LoadCommit(commitId);
 			var document = LoadCommitPatch(commitId);
 			using var module = ModuleDefMD.Load(RootModulePath);
 			var report = ILPatchHeadlessApplier.Apply(module, document);
@@ -313,6 +319,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 					.Where(a => a.Action == ILPatchHeadlessAction.Unresolved)
 					.Select(a => a.Message));
 				throw new InvalidOperationException("Could not materialize repository commit from the immutable root: " + details);
+			}
+			string exportedState = ILPatchModuleStateHasher.Compute(module);
+			if (!StringComparer.Ordinal.Equals(exportedState, commit.StateHash)) {
+				throw new InvalidDataException(
+					$"Repository commit {ShortHash(commit.Id)} failed state verification. " +
+					"The stored patch or commit metadata may be corrupted.");
 			}
 			module.Write(outputPath);
 		}
@@ -332,6 +344,50 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var commit = LoadCommit(id);
 			string patchPath = Path.Combine(RepositoryPath, commit.PatchFile.Replace('/', Path.DirectorySeparatorChar));
 			return ILPatchSerializer.Load(patchPath);
+		}
+
+		/// <summary>
+		/// Creates a parent-to-commit semantic delta for history review. Stored commit patches
+		/// remain ROOT-to-commit snapshots so exporting a node never depends on its ancestors.
+		/// </summary>
+		public ILPatchDocument CreateCommitDelta(string id) {
+			var commit = LoadCommit(id);
+			var currentDocument = LoadCommitPatch(id);
+			var parentDocument = commit.ParentId is null
+				? new ILPatchDocument { Name = "ROOT" }
+				: LoadCommitPatch(commit.ParentId);
+			var currentState = currentDocument.Methods.ToDictionary(
+				a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
+			var parentState = parentDocument.Methods.ToDictionary(
+				a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
+
+			using var rootModule = ModuleDefMD.Load(RootModulePath);
+			var rootMethods = BuildMethodMap(rootModule);
+			var delta = new ILPatchDocument {
+				Name = commit.Message,
+				CreatedUtc = commit.CreatedUtc,
+			};
+
+			foreach (var summary in commit.Changes) {
+				string key = summary.Target.ToCanonicalString();
+				if (!rootMethods.TryGetValue(key, out var rootMethod) || rootMethod.Body is null)
+					throw new InvalidDataException($"Repository commit references missing ROOT method '{summary.Target}'.");
+				var rootSnapshot = CreateSnapshot(rootMethod);
+				parentState.TryGetValue(key, out var parentChange);
+				currentState.TryGetValue(key, out var currentChange);
+				var before = parentChange?.PatchedBody ?? rootSnapshot;
+				var after = currentChange?.PatchedBody ?? rootSnapshot;
+				if (StringComparer.Ordinal.Equals(before.CanonicalHash, after.CanonicalHash))
+					continue;
+				delta.Methods.Add(new ILPatchMethodChange {
+					Id = currentChange?.Id ?? parentChange?.Id ?? Guid.NewGuid().ToString("N"),
+					Target = rootSnapshot.Method,
+					BaseModuleMvid = rootModule.Mvid ?? Guid.Empty,
+					BaseBody = before,
+					PatchedBody = after,
+				});
+			}
+			return delta;
 		}
 
 		static Dictionary<string, MethodDef> BuildMethodMap(ModuleDef module) {
@@ -439,6 +495,22 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var snapshot = CilNormalizer.CreateSnapshot(method);
 			snapshot.CanonicalHash = ILPatchBodyHasher.Compute(snapshot);
 			return snapshot;
+		}
+
+		void ValidateRootIntegrity() {
+			if (!File.Exists(RootModulePath))
+				throw new FileNotFoundException("Repository immutable ROOT assembly is missing.", RootModulePath);
+			string fileHash = ILPatchModuleStateHasher.ComputeFileSha256(RootModulePath);
+			if (!StringComparer.Ordinal.Equals(fileHash, Metadata.RootFileSha256)) {
+				throw new InvalidDataException(
+					"Repository immutable ROOT file hash does not match repo.json. The .dnspy/base assembly was modified or corrupted.");
+			}
+			using var module = ModuleDefMD.Load(RootModulePath);
+			string stateHash = ILPatchModuleStateHasher.Compute(module);
+			if (!StringComparer.Ordinal.Equals(stateHash, Metadata.RootStateHash)) {
+				throw new InvalidDataException(
+					"Repository immutable ROOT semantic state does not match repo.json.");
+			}
 		}
 
 		string GetCommitPath(string id) =>
