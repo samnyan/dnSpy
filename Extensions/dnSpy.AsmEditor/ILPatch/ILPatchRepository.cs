@@ -486,7 +486,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			try {
 				if (Environment.OSVersion.Platform == PlatformID.Win32NT) {
 					var info = new DirectoryInfo(path);
-					info.Attributes |= FileAttributes.Hidden;
+					info.Attributes |= System.IO.FileAttributes.Hidden;
 				}
 			}
 			catch {
