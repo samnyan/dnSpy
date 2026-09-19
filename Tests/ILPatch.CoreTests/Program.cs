@@ -41,6 +41,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(DocumentCreatorRejectsAddedMethod), DocumentCreatorRejectsAddedMethod),
 				(nameof(DocumentCreatorRejectsMethodFlagChange), DocumentCreatorRejectsMethodFlagChange),
 				(nameof(DocumentCreatorDiskRoundTripCapturesBodyChange), DocumentCreatorDiskRoundTripCapturesBodyChange),
+				(nameof(DiffEngineAlignsModifiedLines), DiffEngineAlignsModifiedLines),
+				(nameof(DiffEngineTracksAddedAndRemovedLines), DiffEngineTracksAddedAndRemovedLines),
+				(nameof(DiffEngineKeepsStableAnchors), DiffEngineKeepsStableAnchors),
 			};
 
 			int failed = 0;
@@ -782,6 +785,41 @@ namespace dnSpy.AsmEditor.ILPatch {
 			True(document is null, "Failed creation must not return a partial patch document.");
 			True(report.UnsupportedReasons.Any(a => a.Contains("added method", StringComparison.OrdinalIgnoreCase)),
 				"Create report should identify the added method.");
+		}
+
+		static void DiffEngineAlignsModifiedLines() {
+			var rows = ILPatchDiffEngine.Compare(
+				new[] { "a", "old", "z" },
+				new[] { "a", "new", "z" });
+			Equal(3, rows.Count, "Simple line replacement should stay aligned.");
+			Equal(ILPatchDiffKind.Same, rows[0].Kind, "First anchor should be unchanged.");
+			Equal(ILPatchDiffKind.Modified, rows[1].Kind, "Replacement should be represented as one Modified row.");
+			Equal("old", rows[1].LeftText, "Modified row must preserve old text.");
+			Equal("new", rows[1].RightText, "Modified row must preserve new text.");
+			Equal(ILPatchDiffKind.Same, rows[2].Kind, "Last anchor should be unchanged.");
+		}
+
+		static void DiffEngineTracksAddedAndRemovedLines() {
+			var rows = ILPatchDiffEngine.Compare(
+				new[] { "a", "remove-1", "remove-2", "z" },
+				new[] { "a", "add-1", "z", "tail" });
+			True(rows.Any(a => a.Kind == ILPatchDiffKind.Modified && a.LeftText == "remove-1" && a.RightText == "add-1"),
+				"First remove/add pair should be a Modified row.");
+			True(rows.Any(a => a.Kind == ILPatchDiffKind.Removed && a.LeftText == "remove-2"),
+				"Unpaired deletion should remain Removed.");
+			True(rows.Any(a => a.Kind == ILPatchDiffKind.Added && a.RightText == "tail"),
+				"Unpaired insertion should remain Added.");
+		}
+
+		static void DiffEngineKeepsStableAnchors() {
+			var rows = ILPatchDiffEngine.Compare(
+				new[] { "start", "same", "old", "end" },
+				new[] { "start", "inserted", "same", "new", "end" });
+			var same = rows.Where(a => a.Kind == ILPatchDiffKind.Same).Select(a => a.LeftText).ToArray();
+			True(same.SequenceEqual(new[] { "start", "same", "end" }),
+				"LCS anchors should keep surrounding unchanged lines aligned.");
+			True(rows.Any(a => a.Kind == ILPatchDiffKind.Added && a.RightText == "inserted"),
+				"Inserted line before an anchor should be visible as Added.");
 		}
 
 		static void DocumentCreatorDiskRoundTripCapturesBodyChange() {

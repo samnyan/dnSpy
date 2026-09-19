@@ -69,15 +69,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly IUndoCommandService undoCommandService;
 		readonly IMethodAnnotations methodAnnotations;
 		readonly IAppService appService;
+		readonly IDecompilerService decompilerService;
 		ILPatchToolWindowContent? content;
 
 		[ImportingConstructor]
 		ILPatchToolWindowContentProvider(IDsDocumentService documentService, IUndoCommandService undoCommandService,
-			IMethodAnnotations methodAnnotations, IAppService appService) {
+			IMethodAnnotations methodAnnotations, IAppService appService, IDecompilerService decompilerService) {
 			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
 			this.undoCommandService = undoCommandService ?? throw new ArgumentNullException(nameof(undoCommandService));
 			this.methodAnnotations = methodAnnotations ?? throw new ArgumentNullException(nameof(methodAnnotations));
 			this.appService = appService ?? throw new ArgumentNullException(nameof(appService));
+			this.decompilerService = decompilerService ?? throw new ArgumentNullException(nameof(decompilerService));
 		}
 
 		public IEnumerable<ToolWindowContentInfo> ContentInfos {
@@ -87,7 +89,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public ToolWindowContent? GetOrCreate(Guid guid) {
 			if (guid != ILPatchToolWindowContent.THE_GUID)
 				return null;
-			return content ??= new ILPatchToolWindowContent(documentService, undoCommandService, methodAnnotations, appService);
+			return content ??= new ILPatchToolWindowContent(documentService, undoCommandService, methodAnnotations, appService, decompilerService);
 		}
 	}
 
@@ -98,8 +100,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly ILPatchWorkspaceControl control;
 
 		public ILPatchToolWindowContent(IDsDocumentService documentService, IUndoCommandService undoCommandService,
-			IMethodAnnotations methodAnnotations, IAppService appService) =>
-			control = new ILPatchWorkspaceControl(documentService, undoCommandService, methodAnnotations, appService);
+			IMethodAnnotations methodAnnotations, IAppService appService, IDecompilerService decompilerService) =>
+			control = new ILPatchWorkspaceControl(documentService, undoCommandService, methodAnnotations, appService, decompilerService);
 
 		public override Guid Guid => THE_GUID;
 		public override string Title => "IL Patch Workspace";
@@ -113,6 +115,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly IUndoCommandService undoCommandService;
 		readonly IMethodAnnotations methodAnnotations;
 		readonly IAppService appService;
+		readonly IDecompilerService decompilerService;
 		readonly ObservableCollection<ChangeRow> changes = new ObservableCollection<ChangeRow>();
 		readonly ObservableCollection<ImportRow> imports = new ObservableCollection<ImportRow>();
 		readonly ObservableCollection<HistoryRow> history = new ObservableCollection<HistoryRow>();
@@ -129,6 +132,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly Button useCandidateButton;
 		readonly Button clearCandidateButton;
 		readonly Button revertButton;
+		readonly Button compareChangeButton;
+		readonly Button compareImportButton;
 		readonly Button importButton;
 		readonly Button refreshImportButton;
 		readonly Button clearImportButton;
@@ -144,11 +149,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public DataGrid ChangesGrid { get; }
 
 		public ILPatchWorkspaceControl(IDsDocumentService documentService, IUndoCommandService undoCommandService,
-			IMethodAnnotations methodAnnotations, IAppService appService) {
+			IMethodAnnotations methodAnnotations, IAppService appService, IDecompilerService decompilerService) {
 			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
 			this.undoCommandService = undoCommandService ?? throw new ArgumentNullException(nameof(undoCommandService));
 			this.methodAnnotations = methodAnnotations ?? throw new ArgumentNullException(nameof(methodAnnotations));
 			this.appService = appService ?? throw new ArgumentNullException(nameof(appService));
+			this.decompilerService = decompilerService ?? throw new ArgumentNullException(nameof(decompilerService));
 
 			var root = new Grid { Margin = new Thickness(8) };
 			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -171,6 +177,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 			revertButton.Click += RevertButton_Click;
 			workspaceButtons.Children.Add(revertButton);
+
+			compareChangeButton = new Button {
+				Content = "Compare Selected...",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Open a Git-style side-by-side diff with Normalized IL and Decompiled C# modes.",
+			};
+			compareChangeButton.Click += CompareChangeButton_Click;
+			workspaceButtons.Children.Add(compareChangeButton);
 
 			var recoverButton = new Button {
 				Content = "Recover from DLL Pair...",
@@ -219,6 +235,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			ChangesGrid.Columns.Add(CreateTextColumn("IL", nameof(ChangeRow.InstructionCount), 0.7));
 			ChangesGrid.ItemsSource = changes;
 			ChangesGrid.SelectionChanged += ChangesGrid_SelectionChanged;
+			ChangesGrid.MouseDoubleClick += ChangesGrid_MouseDoubleClick;
 			Grid.SetColumn(ChangesGrid, 0);
 			reviewGrid.Children.Add(ChangesGrid);
 
@@ -264,6 +281,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 			importButton.Click += ImportButton_Click;
 			replayButtons.Children.Add(importButton);
+
+			compareImportButton = new Button {
+				Content = "Compare Patch...",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Compare the selected patch entry's stored Base and Patched bodies side-by-side.",
+			};
+			compareImportButton.Click += CompareImportButton_Click;
+			replayButtons.Children.Add(compareImportButton);
 
 			clearImportButton = new Button {
 				Content = "Clear Import",
@@ -341,6 +368,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			importGrid.Columns.Add(CreateTextColumn("Details", nameof(ImportRow.Details), 2.5));
 			importGrid.ItemsSource = imports;
 			importGrid.SelectionChanged += ImportGrid_SelectionChanged;
+			importGrid.MouseDoubleClick += ImportGrid_MouseDoubleClick;
 			Grid.SetRow(importGrid, 3);
 			root.Children.Add(importGrid);
 
@@ -743,6 +771,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			candidateSelector.IsEnabled = false;
 			useCandidateButton.IsEnabled = false;
 			clearCandidateButton.IsEnabled = false;
+			compareImportButton.IsEnabled = false;
 			clearImportButton.IsEnabled = false;
 			refreshImportButton.IsEnabled = false;
 			applyButton.IsEnabled = false;
@@ -940,19 +969,57 @@ namespace dnSpy.AsmEditor.ILPatch {
 		void ChangesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) {
 			var row = ChangesGrid.SelectedItem as ChangeRow;
 			revertButton.IsEnabled = row is not null;
+			compareChangeButton.IsEnabled = row is not null;
 			if (row is null)
 				return;
 			importGrid.SelectedItem = null;
 			UpdateDiff(row);
 		}
 
+		void ChangesGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e) {
+			if (ChangesGrid.SelectedItem is ChangeRow)
+				OpenSelectedChangeDiff();
+		}
+
+		void CompareChangeButton_Click(object sender, RoutedEventArgs e) => OpenSelectedChangeDiff();
+
+		void OpenSelectedChangeDiff() {
+			var row = ChangesGrid.SelectedItem as ChangeRow;
+			if (row is null)
+				return;
+			ILPatchWorkspace.Instance.TryGetTrackedBaseline(row.Change.Target, out var target, out _);
+			ShowDiffWindow(row.Change, target);
+		}
+
 		void ImportGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) {
 			var row = importGrid.SelectedItem as ImportRow;
+			compareImportButton.IsEnabled = row is not null;
 			UpdateCandidateControls(row);
 			if (row is null)
 				return;
 			ChangesGrid.SelectedItem = null;
 			diffText.Text = BuildImportReview(row.Result);
+		}
+
+		void ImportGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e) {
+			if (importGrid.SelectedItem is ImportRow)
+				OpenSelectedImportDiff();
+		}
+
+		void CompareImportButton_Click(object sender, RoutedEventArgs e) => OpenSelectedImportDiff();
+
+		void OpenSelectedImportDiff() {
+			var row = importGrid.SelectedItem as ImportRow;
+			if (row is null)
+				return;
+			ShowDiffWindow(row.Result.Patch, row.Result.Target);
+		}
+
+		void ShowDiffWindow(ILPatchMethodChange change, MethodDef? target) {
+			var window = new ILPatchDiffWindow(change, target, decompilerService) {
+				Owner = Window.GetWindow(this),
+			};
+			window.Show();
 		}
 
 		void CandidateSelector_SelectionChanged(object sender, SelectionChangedEventArgs e) =>

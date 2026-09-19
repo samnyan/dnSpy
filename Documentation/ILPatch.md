@@ -175,6 +175,17 @@ The first UI can show normalized IL. A decompiled C# diff can be added as a conv
 
 The import dialog supports selecting multiple `.ilpatch` files. Independent entries are combined into one preview and one undoable application batch, while the **Source** column keeps each method traceable to its original patch file. The batch composer intentionally refuses two selected files that target the same method identity: those patches may depend on application order, so silently flattening them against one pre-mutation baseline would be unsafe.
 
+### Side-by-side patch diff
+
+Tracked workspace changes and imported patch entries can be opened in a dedicated **Compare** window (or by double-clicking the row). The viewer keeps both sides vertically aligned in one grid and classifies each line as unchanged, added, removed, or modified.
+
+Two review projections are available:
+
+- **Normalized IL** — authoritative patch-oriented representation using stable instruction indices and normalized operands, plus locals/init-locals/exception-handler metadata.
+- **Decompiled C#** — review-only projection. The Base and Patched snapshots are materialized against the loaded target method and passed through dnSpy's C# decompiler, then line-diffed side-by-side. If a compatible target method is unavailable or an operand cannot be rebound safely, this mode reports the reason and leaves Normalized IL available.
+
+The C# diff deliberately never becomes the source of truth for apply/rebase decisions; decompiler output can change across decompiler versions even when IL semantics do not.
+
 ### Recommended GUI workflow
 
 The Patch Workspace is split conceptually into two workflows:
