@@ -773,8 +773,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 			int cleanRebase = preview.Results.Count(a => a.Status == ILPatchImportStatus.BaseChanged && a.RebasePreview?.Status == ILPatchRebaseStatus.Clean);
 			int conflictRebase = preview.Results.Count(a => a.Status == ILPatchImportStatus.BaseChanged && a.RebasePreview?.Status == ILPatchRebaseStatus.Conflict);
 			int unsupportedRebase = preview.Results.Count(a => a.Status == ILPatchImportStatus.BaseChanged && a.RebasePreview?.Status == ILPatchRebaseStatus.Unsupported);
+			int previewStructuralCount = preview.Document.TypeChanges.Count(a => a.HasEffectiveChange);
 			importSummaryText.Text =
-				$"{sourceLabel}: {preview.Results.Count} method(s) — " +
+				$"{sourceLabel}: {preview.Results.Count} method(s), {previewStructuralCount} structural type set(s) — " +
 				$"{preview.Count(ILPatchImportStatus.Exact)} exact, " +
 				$"{preview.Count(ILPatchImportStatus.AlreadyApplied)} already present, " +
 				$"{preview.Count(ILPatchImportStatus.RebasedApplied)} rebased present, " +
@@ -785,20 +786,36 @@ namespace dnSpy.AsmEditor.ILPatch {
 				$"{preview.Count(ILPatchImportStatus.Incompatible)} incompatible.";
 			int exactCount = preview.Count(ILPatchImportStatus.Exact);
 			int safeCount = exactCount + cleanRebase;
+			int structuralCount = preview.Document.TypeChanges.Count(a => a.HasEffectiveChange);
+			bool hasStructural = structuralCount != 0;
+			bool exactStructuralReady = hasStructural && preview.Results.All(a =>
+				a.Status == ILPatchImportStatus.Exact ||
+				a.Status == ILPatchImportStatus.AlreadyApplied ||
+				a.Status == ILPatchImportStatus.RebasedApplied);
+			bool safeStructuralReady = hasStructural && preview.Results.All(a =>
+				a.Status == ILPatchImportStatus.Exact ||
+				a.Status == ILPatchImportStatus.AlreadyApplied ||
+				a.Status == ILPatchImportStatus.RebasedApplied ||
+				(a.Status == ILPatchImportStatus.BaseChanged && a.RebasePreview?.Status == ILPatchRebaseStatus.Clean));
 			int updateableCount = preview.Results.Count(CanUpdatePatchDefinition);
 			int unresolvedCount = preview.Results.Count - updateableCount;
-			applyButton.IsEnabled = exactCount != 0;
-			rebaseButton.IsEnabled = cleanRebase != 0;
-			applySafeButton.IsEnabled = safeCount != 0;
-			exportRebasedButton.IsEnabled = updateableCount != 0;
+			applyButton.IsEnabled = exactCount != 0 || exactStructuralReady;
+			rebaseButton.IsEnabled = cleanRebase != 0 && !hasStructural;
+			applySafeButton.IsEnabled = safeCount != 0 || safeStructuralReady;
+			exportRebasedButton.IsEnabled = updateableCount != 0 || hasStructural;
 			clearImportButton.IsEnabled = true;
 			refreshImportButton.IsEnabled = true;
-			applyButton.Content = $"Apply Exact ({exactCount})";
+			applyButton.Content = hasStructural ? $"Apply Exact ({exactCount} methods + {structuralCount} type set)" : $"Apply Exact ({exactCount})";
 			rebaseButton.Content = $"Apply Clean Rebase ({cleanRebase})";
-			applySafeButton.Content = $"Apply Safe ({safeCount})";
-			exportRebasedButton.Content = $"Export Rebased ({updateableCount})...";
-			if (preview.Results.Count == 0) {
-				importHintText.Text = "This patch document contains no method entries.";
+			applySafeButton.Content = hasStructural ? $"Apply Safe ({safeCount} methods + {structuralCount} type set)" : $"Apply Safe ({safeCount})";
+			exportRebasedButton.Content = hasStructural ? $"Export Rebased ({updateableCount} methods + structure)..." : $"Export Rebased ({updateableCount})...";
+			if (preview.Results.Count == 0 && hasStructural) {
+				importHintText.Text =
+					$"This patch contains {structuralCount} type/member structural change-set(s) and no existing-method body entries. " +
+					"Apply Exact or Apply Safe will replay the structural changes atomically.";
+			}
+			else if (preview.Results.Count == 0) {
+				importHintText.Text = "This patch document contains no method or structural entries.";
 			}
 			else if (unresolvedCount == 0 && safeCount == 0) {
 				importHintText.Text =
@@ -1027,17 +1044,22 @@ namespace dnSpy.AsmEditor.ILPatch {
 			IReadOnlyList<ILPatchTypeChange> changes, IReadOnlyList<ModuleDef> modules) {
 			var result = new Dictionary<ModuleDef, List<ILPatchTypeChange>>();
 			foreach (var change in changes.Where(a => a.HasEffectiveChange)) {
-				var candidates = modules.Where(module =>
-					(string.IsNullOrEmpty(change.Target.ModuleName) ||
-						StringComparer.Ordinal.Equals(module.Name?.String ?? string.Empty, change.Target.ModuleName)) &&
-					(string.IsNullOrEmpty(change.Target.AssemblyName) ||
-						StringComparer.Ordinal.Equals(module.Assembly?.Name?.String ?? string.Empty, change.Target.AssemblyName)) &&
-					module.GetTypes().Any(type => StringComparer.Ordinal.Equals(type.FullName, change.Target.FullName)))
-					.ToArray();
+				var candidates = modules.Where(module => {
+					if (!string.IsNullOrEmpty(change.Target.ModuleName) &&
+						!StringComparer.Ordinal.Equals(module.Name?.String ?? string.Empty, change.Target.ModuleName))
+						return false;
+					if (!string.IsNullOrEmpty(change.Target.AssemblyName) &&
+						!StringComparer.Ordinal.Equals(module.Assembly?.Name?.String ?? string.Empty, change.Target.AssemblyName))
+						return false;
+					if (change.Kind == ILPatchTypeChangeKind.Add)
+						return true;
+					return module.GetTypes().Any(type =>
+						StringComparer.Ordinal.Equals(type.FullName, change.Target.FullName));
+				}).ToArray();
 				if (candidates.Length != 1) {
 					throw new InvalidOperationException(candidates.Length == 0
-						? $"Could not find loaded target type '{change.Target.FullName}' for structural replay."
-						: $"Structural target type '{change.Target.FullName}' is ambiguous across {candidates.Length} loaded modules.");
+						? $"Could not find loaded target module/type for structural replay '{change.Target.FullName}'."
+						: $"Structural target '{change.Target.FullName}' is ambiguous across {candidates.Length} loaded modules.");
 				}
 				if (!result.TryGetValue(candidates[0], out var list))
 					result.Add(candidates[0], list = new List<ILPatchTypeChange>());
