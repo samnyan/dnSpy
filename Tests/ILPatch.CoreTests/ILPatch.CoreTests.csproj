@@ -30,6 +30,7 @@
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchDiffEngine.cs" Link="Core\ILPatchDiffEngine.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchInlineDiffEngine.cs" Link="Core\ILPatchInlineDiffEngine.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchRepository.cs" Link="Core\ILPatchRepository.cs" />
+    <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchAssemblyShapeGuard.cs" Link="Core\ILPatchAssemblyShapeGuard.cs" />
   </ItemGroup>
 
 </Project>

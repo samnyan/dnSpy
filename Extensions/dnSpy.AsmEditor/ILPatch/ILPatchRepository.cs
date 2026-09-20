@@ -78,6 +78,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 						"|body=" + bodyHash);
 				}
 			}
+			lines.Add("shape|" + ILPatchAssemblyShapeGuard.ComputeFingerprint(module));
 			lines.Sort(StringComparer.Ordinal);
 			return Sha256Hex(string.Join("\n", lines));
 		}
@@ -218,6 +219,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				throw new ArgumentException("Commit message cannot be empty.", nameof(message));
 
 			using var rootModule = ModuleDefMD.Load(RootModulePath);
+			ILPatchAssemblyShapeGuard.ThrowIfUnsupported(rootModule, currentModule);
 			var rootMethods = BuildMethodMap(rootModule);
 			var currentMethods = BuildMethodMap(currentModule);
 			ValidateMethodShape(rootMethods, currentMethods);
@@ -317,6 +319,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			try {
 				ValidateRootIntegrity();
 				using var rootModule = ModuleDefMD.Load(RootModulePath);
+				ILPatchAssemblyShapeGuard.ThrowIfUnsupported(rootModule, currentModule);
 				var rootMethods = BuildMethodMap(rootModule);
 				var currentMethods = BuildMethodMap(currentModule);
 				ValidateMethodShape(rootMethods, currentMethods);

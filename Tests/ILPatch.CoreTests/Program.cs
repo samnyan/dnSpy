@@ -53,6 +53,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(RepositorySelectiveCommitLeavesUnstagedChange), RepositorySelectiveCommitLeavesUnstagedChange),
 				(nameof(RepositorySelectiveCommitRejectsStaleSelection), RepositorySelectiveCommitRejectsStaleSelection),
 				(nameof(RepositoryDetectsTamperedRoot), RepositoryDetectsTamperedRoot),
+				(nameof(RepositoryRejectsUnsupportedFieldChange), RepositoryRejectsUnsupportedFieldChange),
+				(nameof(RepositoryRejectsUnsupportedTypeMetadataChange), RepositoryRejectsUnsupportedTypeMetadataChange),
+				(nameof(RepositoryRejectsUnsupportedResourceChange), RepositoryRejectsUnsupportedResourceChange),
 				(nameof(RepositoryRestorePatchTargetsHistoricalCommit), RepositoryRestorePatchTargetsHistoricalCommit),
 				(nameof(RepositoryRestorePatchTargetsRoot), RepositoryRestorePatchTargetsRoot),
 			};
@@ -1399,6 +1402,42 @@ namespace dnSpy.AsmEditor.ILPatch {
 		static void NotNull(object? value, string message) {
 			if (value is null)
 				throw new InvalidOperationException(message);
+		}
+
+		static void RepositoryRejectsUnsupportedFieldChange() {
+			var method = CreateNamedIntMethod("Run", 1);
+			using var baseline = CloneModule(method.Module);
+			method.DeclaringType.Fields.Add(new FieldDefUser("debugMode",
+				new FieldSig(method.Module.CorLibTypes.Boolean), FieldAttributes.Public));
+			var changes = ILPatchAssemblyShapeGuard.Compare(baseline, method.Module);
+			True(changes.Any(a => a.Kind.StartsWith("Field ", StringComparison.Ordinal)),
+				"Adding a field must be reported as an unsupported repository change.");
+		}
+
+		static void RepositoryRejectsUnsupportedTypeMetadataChange() {
+			var method = CreateNamedIntMethod("Run", 1);
+			using var baseline = CloneModule(method.Module);
+			method.DeclaringType.Attributes ^= TypeAttributes.Abstract;
+			var changes = ILPatchAssemblyShapeGuard.Compare(baseline, method.Module);
+			True(changes.Any(a => a.Kind == "Type modified"),
+				"Changing type attributes must be reported as an unsupported repository change.");
+		}
+
+		static void RepositoryRejectsUnsupportedResourceChange() {
+			var method = CreateNamedIntMethod("Run", 1);
+			method.Module.Resources.Add(new EmbeddedResource("data.bin", new byte[] { 1, 2, 3 }));
+			using var baseline = CloneModule(method.Module);
+			method.Module.Resources.Clear();
+			method.Module.Resources.Add(new EmbeddedResource("data.bin", new byte[] { 1, 2, 4 }));
+			var changes = ILPatchAssemblyShapeGuard.Compare(baseline, method.Module);
+			True(changes.Any(a => a.Kind == "Resource modified"),
+				"Changing embedded resource bytes must be reported as an unsupported repository change.");
+		}
+
+		static ModuleDefMD CloneModule(ModuleDef module) {
+			using var stream = new MemoryStream();
+			module.Write(stream);
+			return ModuleDefMD.Load(stream.ToArray());
 		}
 
 		static void Equal<T>(T expected, T actual, string message) {
