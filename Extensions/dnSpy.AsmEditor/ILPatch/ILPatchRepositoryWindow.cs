@@ -27,8 +27,11 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
 using dnlib.DotNet;
+using dnSpy.AsmEditor.UndoRedo;
+using dnSpy.Contracts.App;
 using dnSpy.Contracts.Decompiler;
 using dnSpy.Contracts.Documents;
+using dnSpy.Contracts.Documents.TreeView;
 using Microsoft.Win32;
 
 namespace dnSpy.AsmEditor.ILPatch {
@@ -39,6 +42,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 	/// </summary>
 	sealed class ILPatchRepositoryWindow : Window {
 		readonly IDsDocumentService documentService;
+		readonly IUndoCommandService undoCommandService;
+		readonly IMethodAnnotations methodAnnotations;
+		readonly IAppService appService;
 		readonly IDecompilerService decompilerService;
 		readonly ComboBox moduleSelector;
 		readonly TextBlock repositoryStatus;
@@ -48,6 +54,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly Button commitButton;
 		readonly TextBox commitMessage;
 		readonly Button exportCommitButton;
+		readonly Button restoreCommitButton;
 		readonly Button compareWorkingChangeButton;
 		readonly Button compareCommitChangeButton;
 		readonly DataGrid workingChangesGrid;
@@ -63,8 +70,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 		bool workingBaseValid;
 		int workingChangeCount;
 
-		public ILPatchRepositoryWindow(IDsDocumentService documentService, IDecompilerService decompilerService) {
+		public ILPatchRepositoryWindow(IDsDocumentService documentService,
+			IUndoCommandService undoCommandService, IMethodAnnotations methodAnnotations,
+			IAppService appService, IDecompilerService decompilerService) {
 			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
+			this.undoCommandService = undoCommandService ?? throw new ArgumentNullException(nameof(undoCommandService));
+			this.methodAnnotations = methodAnnotations ?? throw new ArgumentNullException(nameof(methodAnnotations));
+			this.appService = appService ?? throw new ArgumentNullException(nameof(appService));
 			this.decompilerService = decompilerService ?? throw new ArgumentNullException(nameof(decompilerService));
 
 			Title = "dnSpy Change Repository";
@@ -299,6 +311,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 			exportCommitButton.Click += ExportCommitButton_Click;
 			actions.Children.Add(exportCommitButton);
+
+			restoreCommitButton = new Button {
+				Content = "Restore Selected to Working Tree",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Undoably replace the in-memory working tree with the selected commit/ROOT state. Repository HEAD and the on-disk DLL are not moved.",
+			};
+			restoreCommitButton.Click += RestoreCommitButton_Click;
+			actions.Children.Add(restoreCommitButton);
 			Grid.SetRow(actions, 3);
 			root.Children.Add(actions);
 
@@ -530,7 +552,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 				workingBaseValid &&
 				staged != 0 &&
 				!string.IsNullOrWhiteSpace(commitMessage.Text);
+			UpdateRestoreButton();
 		}
+
+		void UpdateRestoreButton() =>
+			restoreCommitButton.IsEnabled = repository is not null &&
+				selectedModule is not null &&
+				workingBaseValid &&
+				historyGrid.SelectedItem is RepositoryHistoryRow;
 
 		void CommitButton_Click(object sender, RoutedEventArgs e) {
 			if (repository is null || selectedModule is null)
@@ -610,6 +639,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			selectedDelta = null;
 			compareCommitChangeButton.IsEnabled = false;
 			exportCommitButton.IsEnabled = false;
+			restoreCommitButton.IsEnabled = false;
 			if (repository is null)
 				return;
 
@@ -650,6 +680,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			compareCommitChangeButton.IsEnabled = false;
 			var row = historyGrid.SelectedItem as RepositoryHistoryRow;
 			exportCommitButton.IsEnabled = repository is not null && row is not null;
+			UpdateRestoreButton();
 			if (repository is null || row is null || string.IsNullOrEmpty(row.CommitId))
 				return;
 
@@ -691,6 +722,75 @@ namespace dnSpy.AsmEditor.ILPatch {
 			MethodDef? target = selectedModule is null ? null : FindMethod(selectedModule.Module, row.Change.Target);
 			var window = new ILPatchDiffWindow(row.Change, target, decompilerService) { Owner = this };
 			window.Show();
+		}
+
+		void RestoreCommitButton_Click(object sender, RoutedEventArgs e) {
+			if (repository is null || selectedModule is null ||
+				historyGrid.SelectedItem is not RepositoryHistoryRow row)
+				return;
+			if (!workingBaseValid) {
+				MessageBox.Show(this,
+					"The loaded working tree is not based on repository HEAD. Restore is disabled because " +
+					"the resulting commit baseline would be ambiguous. Export/open HEAD first, then retry.",
+					"Working tree is not based on HEAD", MessageBoxButton.OK, MessageBoxImage.Warning);
+				return;
+			}
+
+			string targetName = string.IsNullOrEmpty(row.CommitId) ? "ROOT" : row.ShortId;
+			var currentChanges = ILPatchWorkspace.Instance.GetEffectiveChanges(selectedModule.Module);
+			string warning = currentChanges.Count == 0
+				? $"Restore the in-memory working tree to {targetName}?\n\n" +
+					"Repository HEAD will not move and the DLL on disk will not be overwritten. " +
+					"The restore is one dnSpy undo command."
+				: $"Restore the in-memory working tree to {targetName}?\n\n" +
+					$"This will replace {currentChanges.Count} current uncommitted method change(s). " +
+					"Repository HEAD will not move and the DLL on disk will not be overwritten. " +
+					"Ctrl+Z can undo the entire restore.";
+
+			if (MessageBox.Show(this, warning, "Restore repository state",
+				MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+				return;
+
+			try {
+				var restore = repository.CreateRestorePatch(selectedModule.Module, row.CommitId);
+				if (restore.Methods.Count == 0) {
+					MessageBox.Show(this,
+						$"The current in-memory module already matches {targetName}.",
+						"Nothing to restore", MessageBoxButton.OK, MessageBoxImage.Information);
+					return;
+				}
+
+				var materializer = new ILPatchBodyMaterializer(selectedModule.Module);
+				var entries = new List<ApplyILPatchCommand.Entry>(restore.Methods.Count);
+				foreach (var change in restore.Methods) {
+					var target = FindMethod(selectedModule.Module, change.Target) ??
+						throw new InvalidOperationException($"Could not resolve current method '{change.Target}'.");
+					var methodNode = appService.DocumentTreeView.FindNode(target) as MethodNode ??
+						throw new InvalidOperationException($"Could not find the dnSpy tree node for '{change.Target}'.");
+					if (!materializer.TryCreate(target, change.PatchedBody, out var newBody, out string error) ||
+						newBody is null) {
+						throw new InvalidOperationException(
+							$"Could not materialize repository state for '{change.Target}': {error}");
+					}
+					entries.Add(new ApplyILPatchCommand.Entry(methodNode, newBody));
+				}
+
+				undoCommandService.Add(new ApplyILPatchCommand(
+					methodAnnotations, entries, "Restore repository state " + targetName));
+				RefreshWorkingState();
+				SetAllStaged(false);
+				RefreshDiskStatus();
+
+				MessageBox.Show(this,
+					$"Restored {entries.Count} method(s) to {targetName} in memory.\n\n" +
+					"HEAD is unchanged. Review/stage the resulting Working Changes, then commit if you want " +
+					"this historical state to become a new commit. Save Module explicitly if you want it on disk.",
+					"Working tree restored", MessageBoxButton.OK, MessageBoxImage.Information);
+			}
+			catch (Exception ex) {
+				MessageBox.Show(this, ex.Message, "Could not restore repository state",
+					MessageBoxButton.OK, MessageBoxImage.Error);
+			}
 		}
 
 		void ExportCommitButton_Click(object sender, RoutedEventArgs e) {

@@ -53,6 +53,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(RepositorySelectiveCommitLeavesUnstagedChange), RepositorySelectiveCommitLeavesUnstagedChange),
 				(nameof(RepositorySelectiveCommitRejectsStaleSelection), RepositorySelectiveCommitRejectsStaleSelection),
 				(nameof(RepositoryDetectsTamperedRoot), RepositoryDetectsTamperedRoot),
+				(nameof(RepositoryRestorePatchTargetsHistoricalCommit), RepositoryRestorePatchTargetsHistoricalCommit),
+				(nameof(RepositoryRestorePatchTargetsRoot), RepositoryRestorePatchTargetsRoot),
 			};
 
 			int failed = 0;
@@ -999,6 +1001,87 @@ namespace dnSpy.AsmEditor.ILPatch {
 					threw = ex.Message.Contains("stale", StringComparison.OrdinalIgnoreCase);
 				}
 				True(threw, "Selective commit must reject a staged snapshot that no longer matches the working tree.");
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+		static void RepositoryRestorePatchTargetsHistoricalCommit() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-restore-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+
+				string firstId;
+				using (var firstState = ModuleDefMD.Load(workingPath)) {
+					var change = CreateWorkingConstantChange(FindFixtureMethod(firstState, "First"), 2);
+					firstId = repository.Commit(firstState, new[] { change }, "first").Id;
+				}
+				string firstExport = Path.Combine(directory, "first.dll");
+				repository.Export(firstId, firstExport);
+				File.Copy(firstExport, workingPath, true);
+
+				string headId;
+				using (var secondState = ModuleDefMD.Load(workingPath)) {
+					var change = CreateWorkingConstantChange(FindFixtureMethod(secondState, "Second"), 20);
+					headId = repository.Commit(secondState, new[] { change }, "second").Id;
+				}
+				string headExport = Path.Combine(directory, "head.dll");
+				repository.Export(headId, headExport);
+
+				using var current = ModuleDefMD.Load(headExport);
+				var restore = repository.CreateRestorePatch(current, firstId);
+				Equal(1, restore.Methods.Count,
+					"Restoring HEAD to the first commit should change only the method introduced by the second commit.");
+				Equal("Second", restore.Methods[0].Target.MethodName,
+					"Restore patch should target the method that differs from the selected historical state.");
+				Equal(20L, restore.Methods[0].BaseBody.Instructions[0].Operand.IntegerValue,
+					"Restore baseline must be the current working state.");
+				Equal(10L, restore.Methods[0].PatchedBody.Instructions[0].Operand.IntegerValue,
+					"Restore patched side must be the selected historical state.");
+
+				var report = ILPatchHeadlessApplier.Apply(current, restore);
+				True(report.Success, "Historical restore patch should apply cleanly to the current module.");
+				Equal(2L, CilNormalizer.CreateSnapshot(FindFixtureMethod(current, "First")).Instructions[0].Operand.IntegerValue,
+					"Restore must preserve state that already matched the selected commit.");
+				Equal(10L, CilNormalizer.CreateSnapshot(FindFixtureMethod(current, "Second")).Instructions[0].Operand.IntegerValue,
+					"Restore must move the differing method to the selected commit state.");
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+		static void RepositoryRestorePatchTargetsRoot() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-restore-root-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+				using (var working = ModuleDefMD.Load(workingPath)) {
+					var first = CreateWorkingConstantChange(FindFixtureMethod(working, "First"), 2);
+					var second = CreateWorkingConstantChange(FindFixtureMethod(working, "Second"), 20);
+					repository.Commit(working, new[] { first, second }, "change both");
+				}
+				string headExport = Path.Combine(directory, "head.dll");
+				repository.Export(repository.Metadata.HeadCommitId, headExport);
+
+				using var current = ModuleDefMD.Load(headExport);
+				var restore = repository.CreateRestorePatch(current, null);
+				Equal(2, restore.Methods.Count,
+					"Restoring to ROOT should include every method that differs from immutable ROOT.");
+				var report = ILPatchHeadlessApplier.Apply(current, restore);
+				True(report.Success, "ROOT restore patch should apply cleanly.");
+				Equal(1L, CilNormalizer.CreateSnapshot(FindFixtureMethod(current, "First")).Instructions[0].Operand.IntegerValue,
+					"ROOT restore must restore First.");
+				Equal(10L, CilNormalizer.CreateSnapshot(FindFixtureMethod(current, "Second")).Instructions[0].Operand.IntegerValue,
+					"ROOT restore must restore Second.");
 			}
 			finally {
 				if (Directory.Exists(directory))

@@ -542,7 +542,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		void RepositoryButton_Click(object sender, RoutedEventArgs e) {
-			var window = new ILPatchRepositoryWindow(documentService, decompilerService) {
+			var window = new ILPatchRepositoryWindow(
+				documentService, undoCommandService, methodAnnotations, appService, decompilerService) {
 				Owner = Window.GetWindow(this),
 			};
 			window.Show();
