@@ -64,7 +64,25 @@ namespace dnSpy.AsmEditor.ILPatch {
 			public bool Success { get; set; }
 			public int ApplicableCount { get; set; }
 			public int AlreadyPresentCount { get; set; }
+			public int StructuralCount { get; set; }
 			public List<EntryJsonReport> Entries { get; } = new List<EntryJsonReport>();
+			public List<StructuralJsonReport> StructuralChanges { get; } = new List<StructuralJsonReport>();
+		}
+
+		sealed class StructuralJsonReport {
+			public string ChangeId { get; set; } = string.Empty;
+			public string Kind { get; set; } = string.Empty;
+			public string Target { get; set; } = string.Empty;
+			public string Action { get; set; } = string.Empty;
+			public int AddedFields { get; set; }
+			public int RemovedFields { get; set; }
+			public int AddedMethods { get; set; }
+			public int RemovedMethods { get; set; }
+			public int AddedProperties { get; set; }
+			public int RemovedProperties { get; set; }
+			public int AddedEvents { get; set; }
+			public int RemovedEvents { get; set; }
+			public string Message { get; set; } = string.Empty;
 		}
 
 		sealed class EntryJsonReport {
@@ -465,6 +483,33 @@ namespace dnSpy.AsmEditor.ILPatch {
 					Message = entry.Message,
 				});
 			}
+			foreach (var change in document.TypeChanges.Where(a => a.HasEffectiveChange)) {
+				var definition = change.TypeDefinition;
+				int addedFields = change.Kind == ILPatchTypeChangeKind.Add ? definition?.Fields.Count ?? 0 : change.AddedFields.Count;
+				int addedMethods = change.Kind == ILPatchTypeChangeKind.Add ? definition?.Methods.Count ?? 0 : change.AddedMethods.Count;
+				int addedProperties = change.Kind == ILPatchTypeChangeKind.Add ? definition?.Properties.Count ?? 0 : change.AddedProperties.Count;
+				int addedEvents = change.Kind == ILPatchTypeChangeKind.Add ? definition?.Events.Count ?? 0 : change.AddedEvents.Count;
+				int removedFields = change.Kind == ILPatchTypeChangeKind.Remove ? definition?.Fields.Count ?? 0 : change.RemovedFields.Count;
+				int removedMethods = change.Kind == ILPatchTypeChangeKind.Remove ? definition?.Methods.Count ?? 0 : change.RemovedMethods.Count;
+				int removedProperties = change.Kind == ILPatchTypeChangeKind.Remove ? definition?.Properties.Count ?? 0 : change.RemovedProperties.Count;
+				int removedEvents = change.Kind == ILPatchTypeChangeKind.Remove ? definition?.Events.Count ?? 0 : change.RemovedEvents.Count;
+				result.StructuralChanges.Add(new StructuralJsonReport {
+					ChangeId = change.Id,
+					Kind = change.Kind.ToString(),
+					Target = change.Target.ToCanonicalString(),
+					Action = report.Success ? change.Kind.ToString() : "Unresolved",
+					AddedFields = addedFields,
+					RemovedFields = removedFields,
+					AddedMethods = addedMethods,
+					RemovedMethods = removedMethods,
+					AddedProperties = addedProperties,
+					RemovedProperties = removedProperties,
+					AddedEvents = addedEvents,
+					RemovedEvents = removedEvents,
+					Message = report.Success ? string.Empty : report.StructuralMessage,
+				});
+			}
+			result.StructuralCount = result.StructuralChanges.Count;
 			return result;
 		}
 

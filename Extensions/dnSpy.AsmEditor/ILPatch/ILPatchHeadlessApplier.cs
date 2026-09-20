@@ -189,8 +189,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 					entry.Target.MethodBody = entry.Body;
 				structuralPlan.CommitRemovals();
 
+				int existingBodyApplications = entries.Count(a =>
+					a.Action == ILPatchHeadlessAction.Exact ||
+					a.Action == ILPatchHeadlessAction.CleanRebase);
 				return new ILPatchHeadlessApplyReport(entries, true,
-					planned.Count + structuralPlan.OperationCount, alreadyPresent, string.Empty);
+					existingBodyApplications + structuralPlan.OperationCount, alreadyPresent, string.Empty);
 			}
 			catch {
 				structuralPlan.RollbackAdditions();

@@ -114,6 +114,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 					VerifyCliReport(args[1], bool.Parse(args[2]), int.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture));
 					return 0;
 				}
+				if (args.Length == 2 && StringComparer.Ordinal.Equals(args[0], "verify-cli-structural-report")) {
+					VerifyCliStructuralReport(args[1]);
+					return 0;
+				}
 				if (args.Length == 2 && StringComparer.Ordinal.Equals(args[0], "verify-cli-rebased-output")) {
 					VerifyCliRebasedOutput(args[1]);
 					return 0;
@@ -276,6 +280,31 @@ namespace dnSpy.AsmEditor.ILPatch {
 			else
 				Equal("Unresolved", action, "Conflicting fixture should report an Unresolved action.");
 			Console.WriteLine("CLI JSON report verified.");
+		}
+
+
+		static void VerifyCliStructuralReport(string reportPath) {
+			reportPath = Path.GetFullPath(reportPath);
+			var json = JObject.Parse(File.ReadAllText(reportPath));
+			Equal(true, (bool?)json["success"] ?? false, "CLI structural JSON report should succeed.");
+			Equal(0, (int?)json["exitCode"] ?? -1, "CLI structural JSON report exit code mismatch.");
+			var patches = json["patches"] as JArray;
+			True(patches is not null && patches.Count == 1, "CLI structural JSON report should contain one patch.");
+			Equal(1, (int?)patches![0]?["structuralCount"] ?? -1,
+				"CLI structural JSON report should expose one whole-type change.");
+			var structural = patches[0]?["structuralChanges"] as JArray;
+			True(structural is not null && structural.Count == 1,
+				"CLI structural JSON report should contain one structural result.");
+			Equal("Add", (string?)structural![0]?["kind"], "CLI structural result should report Add.");
+			Equal("Add", (string?)structural[0]?["action"], "CLI structural action should report Add.");
+			Equal(1, (int?)structural[0]?["addedFields"] ?? -1,
+				"CLI structural result should report the added field.");
+			Equal(1, (int?)structural[0]?["addedMethods"] ?? -1,
+				"CLI structural result should report the added method.");
+			var entries = patches[0]?["entries"] as JArray;
+			True(entries is not null && entries.Count == 0,
+				"Whole-type structural fixture intentionally has no existing-method patch rows.");
+			Console.WriteLine("CLI structural JSON report verified.");
 		}
 
 		static void BodyHashIgnoresMaxStack() {
