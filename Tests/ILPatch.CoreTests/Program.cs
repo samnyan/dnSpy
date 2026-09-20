@@ -26,6 +26,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(RebasedAppliedRoundTripIsDetected), RebasedAppliedRoundTripIsDetected),
 				(nameof(UnappliedUpstreamBodyIsNotRebasedApplied), UnappliedUpstreamBodyIsNotRebasedApplied),
 				(nameof(ManualOverrideCanRetargetRenamedMethod), ManualOverrideCanRetargetRenamedMethod),
+				(nameof(StructuralMatcherFindsNearbyMethodAfterSignatureChange), StructuralMatcherFindsNearbyMethodAfterSignatureChange),
 				(nameof(ManualOverrideRejectsSignatureChange), ManualOverrideRejectsSignatureChange),
 				(nameof(UpdatedDefinitionPersistsManualRenamedTarget), UpdatedDefinitionPersistsManualRenamedTarget),
 				(nameof(UpdatedDefinitionRebasesCleanUpstreamChange), UpdatedDefinitionRebasesCleanUpstreamChange),
@@ -486,6 +487,29 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			False(ILPatchRebasedAppliedDetector.TryDetect(patch, target, upstream, out _),
 				"An upstream-only body must not be mistaken for an already-rebased patch.");
+		}
+
+		static void StructuralMatcherFindsNearbyMethodAfterSignatureChange() {
+			var source = CreateNamedIntMethod("RunPlayer", 1);
+			var patch = CreateRealBodyConstantPatch(source, 2);
+
+			var module = CreateModule();
+			var type = new TypeDefUser("Tests", "Fixture", module.CorLibTypes.Object.TypeDefOrRef);
+			module.Types.Add(type);
+			var nearby = new MethodDefUser("RunPlayer",
+				MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32)) {
+				Body = new dnlib.DotNet.Emit.CilBody(),
+			};
+			nearby.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.CreateLdcI4(1));
+			nearby.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
+			type.Methods.Add(nearby);
+			AddConstantMethod(type, "Unrelated", 99);
+
+			var candidates = ILPatchStructuralMatcher.CreateCatalog(type.Methods).FindCandidates(patch);
+			True(candidates.Any(a => ReferenceEquals(a.Method, nearby)),
+				"Advisory matching should still find a same-type/same-name method after its parameter count changes.");
+			Equal(nearby, candidates[0].Method,
+				"Same-type/same-name nearby code should rank ahead of unrelated structural candidates.");
 		}
 
 		static void ManualOverrideCanRetargetRenamedMethod() {

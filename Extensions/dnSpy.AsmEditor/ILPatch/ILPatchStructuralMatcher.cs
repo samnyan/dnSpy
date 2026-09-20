@@ -47,7 +47,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 	/// authorize patch application. The three-way rebase layer will make that decision later.
 	/// </summary>
 	static class ILPatchStructuralMatcher {
-		const int MaxCandidates = 5;
+		const int MaxCandidates = 8;
+		const int MaxScoredCandidates = 512;
 
 		public sealed class Catalog {
 			sealed class CandidateHeader {
@@ -96,9 +97,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 					return Array.Empty<ILPatchStructuralCandidate>();
 
 				var source = new Fingerprint(patch.Target, patch.BaseBody);
-				var candidates = new List<ILPatchStructuralCandidate>(bucket.Count);
+				// Candidate discovery is deliberately broader than apply compatibility. A new build
+				// may change a method signature, so analysis must still be able to show nearby code.
+				// Cheap identity affinity narrows very large modules before body fingerprints are built.
+				var headers = bucket
+					.OrderByDescending(a => HeaderAffinity(patch.Target, a.Identity))
+					.ThenBy(a => a.Identity.ToCanonicalString(), StringComparer.Ordinal)
+					.Take(MaxScoredCandidates)
+					.ToArray();
+				var candidates = new List<ILPatchStructuralCandidate>(headers.Length);
 
-				foreach (var header in bucket) {
+				foreach (var header in headers) {
 					var current = GetCandidateData(header);
 					double score = Score(source, current.Fingerprint, out string explanation);
 					candidates.Add(new ILPatchStructuralCandidate(header.Method, current.Identity, score, current.BodyHash, explanation));
@@ -187,48 +196,152 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		static string CreateCoarseKey(ILPatchMethodIdentity identity) =>
-			$"{identity.AssemblyName}\u001F{identity.ModuleName}\u001F{identity.HasThis}\u001F{identity.GenericArity}\u001F{identity.ParameterTypes.Count}";
+			$"{identity.AssemblyName}\u001F{identity.ModuleName}";
+
+		static double HeaderAffinity(ILPatchMethodIdentity source, ILPatchMethodIdentity candidate) {
+			double score = 0;
+			if (StringComparer.Ordinal.Equals(source.DeclaringType, candidate.DeclaringType))
+				score += 8;
+			else {
+				if (StringComparer.Ordinal.Equals(GetTypeLeafName(source.DeclaringType), GetTypeLeafName(candidate.DeclaringType)))
+					score += 4;
+				if (StringComparer.Ordinal.Equals(GetTypeNamespace(source.DeclaringType), GetTypeNamespace(candidate.DeclaringType)))
+					score += 3;
+			}
+			if (StringComparer.Ordinal.Equals(source.MethodName, candidate.MethodName))
+				score += 6;
+			else
+				score += 2 * NameSimilarity(source.MethodName, candidate.MethodName);
+			if (source.HasThis == candidate.HasThis)
+				score += 1;
+			if (source.GenericArity == candidate.GenericArity)
+				score += 1;
+			score += CountSimilarity(source.ParameterTypes.Count, candidate.ParameterTypes.Count);
+			return score;
+		}
 
 		static double Score(Fingerprint source, Fingerprint candidate, out string explanation) {
 			double weightedScore = 0;
 			double totalWeight = 0;
 			var details = new List<string>();
 
-			AddScore("sig", 0.20, SignatureSimilarity(source.Identity, candidate.Identity), ref weightedScore, ref totalWeight, details);
-			AddScore("op", 0.30, Jaccard(source.OpcodeNgrams, candidate.OpcodeNgrams), ref weightedScore, ref totalWeight, details);
+			// Identity is strong review evidence in normal game rebuilds, but never an apply
+			// authorization. Body structure still carries the majority of the score.
+			AddScore("decl", 0.14, DeclaringTypeSimilarity(source.Identity, candidate.Identity), ref weightedScore, ref totalWeight, details);
+			AddScore("name", 0.12, NameSimilarity(source.Identity.MethodName, candidate.Identity.MethodName), ref weightedScore, ref totalWeight, details);
+			AddScore("sig", 0.14, SignatureSimilarity(source.Identity, candidate.Identity), ref weightedScore, ref totalWeight, details);
+			AddScore("op", 0.24, Jaccard(source.OpcodeNgrams, candidate.OpcodeNgrams), ref weightedScore, ref totalWeight, details);
 			AddScore("len", 0.05, CountSimilarity(source.InstructionCount, candidate.InstructionCount), ref weightedScore, ref totalWeight, details);
-			AddScore("eh", 0.05, SequenceSimilarity(source.HandlerTypes, candidate.HandlerTypes), ref weightedScore, ref totalWeight, details);
-			AddOptionalSetScore("call", 0.15, source.Calls, candidate.Calls, ref weightedScore, ref totalWeight, details);
-			AddOptionalSetScore("field", 0.10, source.Fields, candidate.Fields, ref weightedScore, ref totalWeight, details);
-			AddOptionalSetScore("str", 0.10, source.Strings, candidate.Strings, ref weightedScore, ref totalWeight, details);
+			AddScore("eh", 0.03, SequenceSimilarity(source.HandlerTypes, candidate.HandlerTypes), ref weightedScore, ref totalWeight, details);
+			AddOptionalSetScore("call", 0.12, source.Calls, candidate.Calls, ref weightedScore, ref totalWeight, details);
+			AddOptionalSetScore("field", 0.08, source.Fields, candidate.Fields, ref weightedScore, ref totalWeight, details);
+			AddOptionalSetScore("str", 0.08, source.Strings, candidate.Strings, ref weightedScore, ref totalWeight, details);
 			AddOptionalSetScore("type", 0.05, source.Types, candidate.Types, ref weightedScore, ref totalWeight, details);
-			AddOptionalSetScore("const", 0.04, source.Constants, candidate.Constants, ref weightedScore, ref totalWeight, details);
-			AddOptionalSetScore("local", 0.04, source.LocalTypes, candidate.LocalTypes, ref weightedScore, ref totalWeight, details);
+			AddOptionalSetScore("const", 0.03, source.Constants, candidate.Constants, ref weightedScore, ref totalWeight, details);
+			AddOptionalSetScore("local", 0.03, source.LocalTypes, candidate.LocalTypes, ref weightedScore, ref totalWeight, details);
 
 			double score = totalWeight == 0 ? 0 : weightedScore / totalWeight;
-
-			// Names are intentionally only small bonuses. They help when the method simply changed
-			// internally, but do not drown out structural evidence after a rename/obfuscation pass.
-			if (StringComparer.Ordinal.Equals(source.Identity.MethodName, candidate.Identity.MethodName))
-				score += 0.025;
-			if (StringComparer.Ordinal.Equals(source.Identity.DeclaringType, candidate.Identity.DeclaringType))
-				score += 0.025;
 			score = Math.Max(0, Math.Min(1, score));
-
 			explanation = string.Join(", ", details) +
 				$", total={(score * 100).ToString("F1", CultureInfo.InvariantCulture)}%";
 			return score;
 		}
 
 		static double SignatureSimilarity(ILPatchMethodIdentity source, ILPatchMethodIdentity candidate) {
-			double matches = StringComparer.Ordinal.Equals(source.ReturnType, candidate.ReturnType) ? 1 : 0;
-			double total = 1;
-			for (int i = 0; i < source.ParameterTypes.Count; i++) {
-				total++;
-				if (StringComparer.Ordinal.Equals(source.ParameterTypes[i], candidate.ParameterTypes[i]))
-					matches++;
+			double score = 0;
+			double total = 0;
+			Add(source.HasThis == candidate.HasThis ? 1 : 0, 0.10);
+			Add(source.GenericArity == candidate.GenericArity ? 1 : CountSimilarity(source.GenericArity, candidate.GenericArity), 0.10);
+			Add(TypeNameSimilarity(source.ReturnType, candidate.ReturnType), 0.20);
+			Add(CountSimilarity(source.ParameterTypes.Count, candidate.ParameterTypes.Count), 0.20);
+			Add(SequenceTypeSimilarity(source.ParameterTypes, candidate.ParameterTypes), 0.40);
+			return total == 0 ? 0 : score / total;
+
+			void Add(double value, double weight) {
+				score += value * weight;
+				total += weight;
 			}
-			return matches / total;
+		}
+
+		static double DeclaringTypeSimilarity(ILPatchMethodIdentity source, ILPatchMethodIdentity candidate) {
+			if (StringComparer.Ordinal.Equals(source.DeclaringType, candidate.DeclaringType))
+				return 1;
+			string sourceLeaf = GetTypeLeafName(source.DeclaringType);
+			string candidateLeaf = GetTypeLeafName(candidate.DeclaringType);
+			string sourceNamespace = GetTypeNamespace(source.DeclaringType);
+			string candidateNamespace = GetTypeNamespace(candidate.DeclaringType);
+			bool sameLeaf = StringComparer.Ordinal.Equals(sourceLeaf, candidateLeaf);
+			bool sameNamespace = StringComparer.Ordinal.Equals(sourceNamespace, candidateNamespace);
+			if (sameLeaf && sameNamespace)
+				return 0.95;
+			if (sameLeaf)
+				return 0.75;
+			if (sameNamespace)
+				return 0.55;
+			return 0.20 * NameSimilarity(sourceLeaf, candidateLeaf);
+		}
+
+		static double SequenceTypeSimilarity(IReadOnlyList<string> source, IReadOnlyList<string> candidate) {
+			if (source.Count == 0 && candidate.Count == 0)
+				return 1;
+			int max = Math.Max(source.Count, candidate.Count);
+			if (max == 0)
+				return 1;
+			double matches = 0;
+			for (int i = 0; i < Math.Min(source.Count, candidate.Count); i++)
+				matches += TypeNameSimilarity(source[i], candidate[i]);
+			return matches / max;
+		}
+
+		static double TypeNameSimilarity(string source, string candidate) {
+			if (StringComparer.Ordinal.Equals(source, candidate))
+				return 1;
+			return NameSimilarity(GetTypeLeafName(source), GetTypeLeafName(candidate)) * 0.75;
+		}
+
+		static double NameSimilarity(string source, string candidate) {
+			if (StringComparer.Ordinal.Equals(source, candidate))
+				return 1;
+			if (StringComparer.OrdinalIgnoreCase.Equals(source, candidate))
+				return 0.95;
+			if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(candidate))
+				return 0;
+			int distance = LevenshteinDistance(source, candidate);
+			return Math.Max(0, 1.0 - (double)distance / Math.Max(source.Length, candidate.Length));
+		}
+
+		static int LevenshteinDistance(string source, string candidate) {
+			var previous = new int[candidate.Length + 1];
+			var current = new int[candidate.Length + 1];
+			for (int j = 0; j <= candidate.Length; j++)
+				previous[j] = j;
+			for (int i = 1; i <= source.Length; i++) {
+				current[0] = i;
+				for (int j = 1; j <= candidate.Length; j++) {
+					int cost = source[i - 1] == candidate[j - 1] ? 0 : 1;
+					current[j] = Math.Min(Math.Min(current[j - 1] + 1, previous[j] + 1), previous[j - 1] + cost);
+				}
+				var swap = previous;
+				previous = current;
+				current = swap;
+			}
+			return previous[candidate.Length];
+		}
+
+		static string GetTypeNamespace(string fullName) {
+			if (string.IsNullOrEmpty(fullName))
+				return string.Empty;
+			int nested = fullName.IndexOf('/');
+			string outer = nested < 0 ? fullName : fullName.Substring(0, nested);
+			int index = outer.LastIndexOf('.');
+			return index < 0 ? string.Empty : outer.Substring(0, index);
+		}
+
+		static string GetTypeLeafName(string fullName) {
+			if (string.IsNullOrEmpty(fullName))
+				return string.Empty;
+			int index = Math.Max(fullName.LastIndexOf('.'), fullName.LastIndexOf('/'));
+			return index < 0 ? fullName : fullName.Substring(index + 1);
 		}
 
 		static double SequenceSimilarity(IReadOnlyList<string> source, IReadOnlyList<string> candidate) {
