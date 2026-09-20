@@ -366,8 +366,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				foreach (var pair in actual) {
 					if (!tracked.TryGetValue(pair.Key, out var trackedChange)) {
 						error =
-							$"Working tree contains an untracked method-body change at '{pair.Value.Target}'. " +
-							"Refresh/reopen the module so ILPatch Workspace can capture its baseline before committing.";
+							$"Working tree is not based on repository HEAD, or contains an untracked method-body change at '{pair.Value.Target}'. " +
+							"Export/open HEAD and refresh the ILPatch Workspace baseline before committing.";
 						return false;
 					}
 					if (!SameBodyTransition(trackedChange, pair.Value)) {
