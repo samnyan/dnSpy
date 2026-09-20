@@ -33,6 +33,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public string AfterHash { get; set; } = string.Empty;
 	}
 
+	enum ILPatchRepositoryStructuralChangeKind {
+		AddedField,
+		RemovedField,
+		AddedMethod,
+		RemovedMethod,
+	}
+
+	sealed class ILPatchRepositoryStructuralSummary {
+		public ILPatchRepositoryStructuralChangeKind Kind { get; set; }
+		public ILPatchTypeIdentity DeclaringType { get; set; } = null!;
+		public string Member { get; set; } = string.Empty;
+	}
+
 	sealed class ILPatchRepositoryCommit {
 		public const int CurrentFormatVersion = 2;
 		public const int MinimumSupportedFormatVersion = 1;
@@ -49,6 +62,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		/// </summary>
 		public string StructureStateHash { get; set; } = string.Empty;
 		public List<ILPatchRepositoryMethodSummary> Changes { get; } = new List<ILPatchRepositoryMethodSummary>();
+		public List<ILPatchRepositoryStructuralSummary> StructuralChanges { get; } = new List<ILPatchRepositoryStructuralSummary>();
 	}
 
 	sealed class ILPatchRepositoryMetadata {
@@ -226,28 +240,18 @@ namespace dnSpy.AsmEditor.ILPatch {
 				throw new ArgumentNullException(nameof(allWorkingChanges));
 			if (selectedChanges is null)
 				throw new ArgumentNullException(nameof(selectedChanges));
-			if (selectedChanges.Count == 0)
-				throw new ArgumentException("At least one working change must be selected for commit.", nameof(selectedChanges));
 			if (string.IsNullOrWhiteSpace(message))
 				throw new ArgumentException("Commit message cannot be empty.", nameof(message));
 
-			using var rootModule = ModuleDefMD.Load(RootModulePath);
-			ILPatchAssemblyShapeGuard.ThrowIfUnsupported(rootModule, currentModule);
-			var rootMethods = BuildMethodMap(rootModule);
-			var currentMethods = BuildMethodMap(currentModule);
-			ValidateMethodShape(rootMethods, currentMethods);
+			if (!TryGetWorkingDelta(currentModule, allWorkingChanges, out var workingDelta, out string validationError) ||
+				workingDelta is null) {
+				throw new InvalidOperationException(validationError);
+			}
 
-			ILPatchDocument parentDocument = Metadata.HeadCommitId is null
-				? new ILPatchDocument { Name = "ROOT" }
-				: LoadCommitPatch(Metadata.HeadCommitId);
-			var parentState = parentDocument.Methods.ToDictionary(
-				a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
 			var workingState = allWorkingChanges.ToDictionary(
 				a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
 			var selectedState = selectedChanges.ToDictionary(
 				a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
-
-			ValidateWorkingBase(rootMethods, currentMethods, parentState, workingState);
 			foreach (var pair in selectedState) {
 				if (!workingState.TryGetValue(pair.Key, out var currentWorking))
 					throw new InvalidOperationException(
@@ -261,35 +265,44 @@ namespace dnSpy.AsmEditor.ILPatch {
 				}
 			}
 
-			var fullState = new Dictionary<string, ILPatchMethodChange>(parentState, StringComparer.Ordinal);
-			foreach (var pair in selectedState) {
-				if (!rootMethods.TryGetValue(pair.Key, out var rootMethod))
-					throw new InvalidOperationException($"Working change '{pair.Value.Target}' does not exist in the repository root.");
+			bool hasStructuralChanges = workingDelta.TypeChanges.Any(a => a.HasEffectiveChange);
+			if (!hasStructuralChanges && selectedChanges.Count == 0)
+				throw new ArgumentException("At least one working change must be selected for commit.", nameof(selectedChanges));
+			if (hasStructuralChanges && selectedState.Count != workingState.Count) {
+				throw new InvalidOperationException(
+					"Working tree contains type/member structural changes. The current repository implementation " +
+					"commits structural changes atomically with all method-body edits in the working tree; stage all method changes first.");
+			}
 
-				var rootSnapshot = CreateSnapshot(rootMethod);
-				var working = pair.Value;
-				if (StringComparer.Ordinal.Equals(rootSnapshot.CanonicalHash, working.PatchedBody.CanonicalHash)) {
-					fullState.Remove(pair.Key);
-					continue;
-				}
+			var incremental = new ILPatchDocument {
+				FormatVersion = ILPatchDocument.CurrentFormatVersion,
+				Name = message.Trim(),
+				CreatedUtc = DateTime.UtcNow,
+			};
+			incremental.Methods.AddRange(selectedChanges);
+			if (hasStructuralChanges)
+				incremental.TypeChanges.AddRange(workingDelta.TypeChanges);
 
-				parentState.TryGetValue(pair.Key, out var previous);
-				fullState[pair.Key] = new ILPatchMethodChange {
-					Id = previous?.Id ?? working.Id,
-					Target = rootSnapshot.Method,
-					BaseModuleMvid = rootModule.Mvid ?? Guid.Empty,
-					BaseBody = rootSnapshot,
-					PatchedBody = working.PatchedBody,
-				};
+			using var parentModule = MaterializeState(Metadata.HeadCommitId);
+			using var desiredModule = MaterializeState(Metadata.HeadCommitId);
+			var applyReport = ILPatchHeadlessApplier.Apply(desiredModule, incremental);
+			if (!applyReport.Success) {
+				string details = DescribeApplyFailure(applyReport);
+				throw new InvalidOperationException(
+					"Could not materialize staged repository changes on top of HEAD: " + details);
+			}
+
+			using var rootModule = ModuleDefMD.Load(RootModulePath);
+			if (!ILPatchDocumentCreator.TryCreate(rootModule, desiredModule, message.Trim(),
+				out var document, out var createReport) || document is null) {
+				throw new InvalidOperationException(
+					"Could not encode the selected repository state as a ROOT-relative ILPatch: " +
+					string.Join("; ", createReport.UnsupportedReasons));
 			}
 
 			var commitTime = DateTime.UtcNow;
-			var document = new ILPatchDocument {
-				Name = message.Trim(),
-				CreatedUtc = commitTime,
-			};
-			document.Methods.AddRange(fullState.Values
-				.OrderBy(a => a.Target.ToCanonicalString(), StringComparer.Ordinal));
+			document.CreatedUtc = commitTime;
+			document.Name = message.Trim();
 
 			string serializedPatch = ILPatchSerializer.Serialize(document);
 			string id = CreateCommitId(Metadata.HeadCommitId, commitTime, message.Trim(), serializedPatch);
@@ -300,10 +313,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Message = message.Trim(),
 				CreatedUtc = commitTime,
 				PatchFile = patchRelativePath,
-				StateHash = ComputeDocumentStateHash(document),
-				StructureStateHash = ComputeDocumentStructureStateHash(document),
+				StateHash = ILPatchModuleStateHasher.Compute(desiredModule),
+				StructureStateHash = ILPatchAssemblyShapeGuard.ComputeFingerprint(desiredModule),
 			};
-			PopulateSummary(commit, rootMethods, parentState, fullState);
+
+			if (!ILPatchDocumentCreator.TryCreate(parentModule, desiredModule, message.Trim(),
+				out var commitDelta, out var deltaReport) || commitDelta is null) {
+				throw new InvalidOperationException(
+					"Could not summarize parent-to-commit changes: " +
+					string.Join("; ", deltaReport.UnsupportedReasons));
+			}
+			PopulateSummaryFromDelta(commit, rootModule, commitDelta);
 
 			string patchPath = Path.Combine(RepositoryPath, patchRelativePath.Replace('/', Path.DirectorySeparatorChar));
 			string commitPath = GetCommitPath(id);
@@ -313,6 +333,131 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Metadata.HeadCommitId = id;
 			WriteJsonAtomic(Path.Combine(RepositoryPath, MetadataFileName), Metadata);
 			return commit;
+		}
+
+		public bool TryGetWorkingDelta(ModuleDef currentModule,
+			IReadOnlyList<ILPatchMethodChange> workingChanges,
+			out ILPatchDocument? delta, out string error) {
+			delta = null;
+			error = string.Empty;
+			try {
+				ValidateRootIntegrity();
+				if (currentModule is null)
+					throw new ArgumentNullException(nameof(currentModule));
+				if (workingChanges is null)
+					throw new ArgumentNullException(nameof(workingChanges));
+
+				using var headModule = MaterializeState(Metadata.HeadCommitId);
+				if (!ILPatchDocumentCreator.TryCreate(headModule, currentModule, "Working tree",
+					out var workingDelta, out var report) || workingDelta is null) {
+					error = "Working tree contains unsupported changes: " +
+						string.Join("; ", report.UnsupportedReasons);
+					return false;
+				}
+
+				var tracked = workingChanges.ToDictionary(
+					a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
+				var actual = workingDelta.Methods.ToDictionary(
+					a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
+				var structurallyRemovedMethods = new HashSet<string>(
+					workingDelta.TypeChanges.SelectMany(a => a.RemovedMethods)
+						.Select(a => a.ToCanonicalString()), StringComparer.Ordinal);
+
+				foreach (var pair in actual) {
+					if (!tracked.TryGetValue(pair.Key, out var trackedChange)) {
+						error =
+							$"Working tree contains an untracked method-body change at '{pair.Value.Target}'. " +
+							"Refresh/reopen the module so ILPatch Workspace can capture its baseline before committing.";
+						return false;
+					}
+					if (!SameBodyTransition(trackedChange, pair.Value)) {
+						error =
+							$"Tracked baseline for '{pair.Value.Target}' does not match repository HEAD/current working state.";
+						return false;
+					}
+				}
+				foreach (var pair in tracked) {
+					if (actual.ContainsKey(pair.Key) || structurallyRemovedMethods.Contains(pair.Key))
+						continue;
+					error =
+						$"ILPatch Workspace reports '{pair.Value.Target}' as modified, but HEAD -> Working Tree does not " +
+						"contain the same body transition. The working baseline is stale.";
+					return false;
+				}
+
+				delta = workingDelta;
+				return true;
+			}
+			catch (Exception ex) {
+				error = ex.Message;
+				return false;
+			}
+		}
+
+		static bool SameBodyTransition(ILPatchMethodChange left, ILPatchMethodChange right) =>
+			StringComparer.Ordinal.Equals(left.BaseBody.CanonicalHash, right.BaseBody.CanonicalHash) &&
+			StringComparer.Ordinal.Equals(left.PatchedBody.CanonicalHash, right.PatchedBody.CanonicalHash);
+
+		static string DescribeApplyFailure(ILPatchHeadlessApplyReport report) {
+			var details = report.Entries
+				.Where(a => a.Action == ILPatchHeadlessAction.Unresolved)
+				.Select(a => a.Message)
+				.Where(a => !string.IsNullOrWhiteSpace(a))
+				.ToList();
+			if (!string.IsNullOrWhiteSpace(report.StructuralMessage))
+				details.Add(report.StructuralMessage);
+			return details.Count == 0 ? "unknown materialization failure" : string.Join("; ", details);
+		}
+
+		static void PopulateSummaryFromDelta(ILPatchRepositoryCommit commit, ModuleDef rootModule,
+			ILPatchDocument delta) {
+			var rootMethods = BuildMethodMap(rootModule);
+			foreach (var change in delta.Methods) {
+				ILPatchRepositoryMethodChangeKind kind = ILPatchRepositoryMethodChangeKind.Modified;
+				string key = change.Target.ToCanonicalString();
+				if (rootMethods.TryGetValue(key, out var rootMethod) && rootMethod.Body is not null) {
+					var root = CreateSnapshot(rootMethod);
+					bool beforeRoot = StringComparer.Ordinal.Equals(change.BaseBody.CanonicalHash, root.CanonicalHash);
+					bool afterRoot = StringComparer.Ordinal.Equals(change.PatchedBody.CanonicalHash, root.CanonicalHash);
+					if (beforeRoot && !afterRoot)
+						kind = ILPatchRepositoryMethodChangeKind.AddedChange;
+					else if (!beforeRoot && afterRoot)
+						kind = ILPatchRepositoryMethodChangeKind.Reverted;
+				}
+				commit.Changes.Add(new ILPatchRepositoryMethodSummary {
+					Target = change.Target,
+					Kind = kind,
+					BeforeHash = change.BaseBody.CanonicalHash,
+					AfterHash = change.PatchedBody.CanonicalHash,
+				});
+			}
+
+			foreach (var typeChange in delta.TypeChanges) {
+				foreach (var field in typeChange.AddedFields)
+					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
+						Kind = ILPatchRepositoryStructuralChangeKind.AddedField,
+						DeclaringType = typeChange.Target,
+						Member = field.Identity.ToString(),
+					});
+				foreach (var field in typeChange.RemovedFields)
+					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
+						Kind = ILPatchRepositoryStructuralChangeKind.RemovedField,
+						DeclaringType = typeChange.Target,
+						Member = field.ToString(),
+					});
+				foreach (var method in typeChange.AddedMethods)
+					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
+						Kind = ILPatchRepositoryStructuralChangeKind.AddedMethod,
+						DeclaringType = typeChange.Target,
+						Member = method.Identity.ToString(),
+					});
+				foreach (var method in typeChange.RemovedMethods)
+					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
+						Kind = ILPatchRepositoryStructuralChangeKind.RemovedMethod,
+						DeclaringType = typeChange.Target,
+						Member = method.ToString(),
+					});
+			}
 		}
 
 		string ComputeDocumentStateHash(ILPatchDocument document) {
@@ -347,30 +492,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		public bool TryValidateWorkingBase(ModuleDef currentModule,
-			IReadOnlyList<ILPatchMethodChange> workingChanges, out string error) {
-			try {
-				ValidateRootIntegrity();
-				using var rootModule = ModuleDefMD.Load(RootModulePath);
-				ILPatchAssemblyShapeGuard.ThrowIfUnsupported(rootModule, currentModule);
-				var rootMethods = BuildMethodMap(rootModule);
-				var currentMethods = BuildMethodMap(currentModule);
-				ValidateMethodShape(rootMethods, currentMethods);
-				ILPatchDocument parentDocument = Metadata.HeadCommitId is null
-					? new ILPatchDocument { Name = "ROOT" }
-					: LoadCommitPatch(Metadata.HeadCommitId);
-				var parentState = parentDocument.Methods.ToDictionary(
-					a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
-				var workingState = workingChanges.ToDictionary(
-					a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
-				ValidateWorkingBase(rootMethods, currentMethods, parentState, workingState);
-				error = string.Empty;
-				return true;
-			}
-			catch (Exception ex) {
-				error = ex.Message;
-				return false;
-			}
-		}
+			IReadOnlyList<ILPatchMethodChange> workingChanges, out string error) =>
+			TryGetWorkingDelta(currentModule, workingChanges, out _, out error);
 
 		public ModuleDefMD MaterializeState(string? commitId) {
 			ValidateRootIntegrity();
@@ -420,37 +543,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 				throw new ArgumentNullException(nameof(currentModule));
 
 			using var desiredModule = MaterializeState(commitId);
-			var currentMethods = BuildMethodMap(currentModule);
-			var desiredMethods = BuildMethodMap(desiredModule);
-			ValidateMethodShape(desiredMethods, currentMethods);
-
-			var result = new ILPatchDocument {
-				Name = string.IsNullOrEmpty(commitId)
-					? "Restore repository ROOT"
-					: "Restore repository " + ShortHash(commitId),
-				CreatedUtc = DateTime.UtcNow,
-			};
-
-			foreach (var pair in desiredMethods.OrderBy(a => a.Key, StringComparer.Ordinal)) {
-				var desired = pair.Value;
-				var current = currentMethods[pair.Key];
-				if (desired.Body is null)
-					continue;
-
-				var before = CreateSnapshot(current);
-				var after = CreateSnapshot(desired);
-				if (StringComparer.Ordinal.Equals(before.CanonicalHash, after.CanonicalHash))
-					continue;
-
-				// Restore patches target the currently loaded method identity/module while preserving
-				// the selected repository state's portable body snapshot.
-				after.Method = before.Method;
-				result.Methods.Add(new ILPatchMethodChange {
-					Target = before.Method,
-					BaseModuleMvid = currentModule.Mvid ?? Guid.Empty,
-					BaseBody = before,
-					PatchedBody = after,
-				});
+			string name = string.IsNullOrEmpty(commitId)
+				? "Restore repository ROOT"
+				: "Restore repository " + ShortHash(commitId);
+			if (!ILPatchDocumentCreator.TryCreate(currentModule, desiredModule, name,
+				out var result, out var report) || result is null) {
+				throw new InvalidOperationException(
+					"Could not create restore patch: " + string.Join("; ", report.UnsupportedReasons));
 			}
 			return result;
 		}
@@ -502,41 +601,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 		/// </summary>
 		public ILPatchDocument CreateCommitDelta(string id) {
 			var commit = LoadCommit(id);
-			var currentDocument = LoadCommitPatch(id);
-			var parentDocument = commit.ParentId is null
-				? new ILPatchDocument { Name = "ROOT" }
-				: LoadCommitPatch(commit.ParentId);
-			var currentState = currentDocument.Methods.ToDictionary(
-				a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
-			var parentState = parentDocument.Methods.ToDictionary(
-				a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
-
-			using var rootModule = ModuleDefMD.Load(RootModulePath);
-			var rootMethods = BuildMethodMap(rootModule);
-			var delta = new ILPatchDocument {
-				Name = commit.Message,
-				CreatedUtc = commit.CreatedUtc,
-			};
-
-			foreach (var summary in commit.Changes) {
-				string key = summary.Target.ToCanonicalString();
-				if (!rootMethods.TryGetValue(key, out var rootMethod) || rootMethod.Body is null)
-					throw new InvalidDataException($"Repository commit references missing ROOT method '{summary.Target}'.");
-				var rootSnapshot = CreateSnapshot(rootMethod);
-				parentState.TryGetValue(key, out var parentChange);
-				currentState.TryGetValue(key, out var currentChange);
-				var before = parentChange?.PatchedBody ?? rootSnapshot;
-				var after = currentChange?.PatchedBody ?? rootSnapshot;
-				if (StringComparer.Ordinal.Equals(before.CanonicalHash, after.CanonicalHash))
-					continue;
-				delta.Methods.Add(new ILPatchMethodChange {
-					Id = currentChange?.Id ?? parentChange?.Id ?? Guid.NewGuid().ToString("N"),
-					Target = rootSnapshot.Method,
-					BaseModuleMvid = rootModule.Mvid ?? Guid.Empty,
-					BaseBody = before,
-					PatchedBody = after,
-				});
+			using var parentModule = MaterializeState(commit.ParentId);
+			using var currentModule = MaterializeState(id);
+			if (!ILPatchDocumentCreator.TryCreate(parentModule, currentModule, commit.Message,
+				out var delta, out var report) || delta is null) {
+				throw new InvalidDataException(
+					"Could not reconstruct parent-to-commit semantic delta: " +
+					string.Join("; ", report.UnsupportedReasons));
 			}
+			delta.CreatedUtc = commit.CreatedUtc;
 			return delta;
 		}
 
@@ -569,75 +642,6 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 		}
 
-		static void ValidateWorkingBase(Dictionary<string, MethodDef> rootMethods,
-			Dictionary<string, MethodDef> currentMethods,
-			Dictionary<string, ILPatchMethodChange> parentState,
-			Dictionary<string, ILPatchMethodChange> workingState) {
-			foreach (var pair in rootMethods) {
-				if (pair.Value.Body is null)
-					continue;
-				var rootSnapshot = CreateSnapshot(pair.Value);
-				string expectedHeadHash = parentState.TryGetValue(pair.Key, out var parentChange)
-					? parentChange.PatchedBody.CanonicalHash
-					: rootSnapshot.CanonicalHash;
-
-				string actualBaseHash;
-				if (workingState.TryGetValue(pair.Key, out var workingChange)) {
-					actualBaseHash = workingChange.BaseBody.CanonicalHash;
-				}
-				else {
-					var currentSnapshot = CreateSnapshot(currentMethods[pair.Key]);
-					actualBaseHash = currentSnapshot.CanonicalHash;
-				}
-
-				if (!StringComparer.Ordinal.Equals(expectedHeadHash, actualBaseHash)) {
-					throw new InvalidOperationException(
-						$"Working tree is not based on repository HEAD at '{pair.Value.FullName}'. " +
-						$"Expected {ShortHash(expectedHeadHash)}, found {ShortHash(actualBaseHash)}. " +
-						"Export/open HEAD before committing new changes, or start a new repository.");
-				}
-			}
-			foreach (var key in workingState.Keys) {
-				if (!rootMethods.ContainsKey(key))
-					throw new InvalidOperationException($"Working patch contains a method that is not present in the repository root: {key}");
-			}
-		}
-
-		static void PopulateSummary(ILPatchRepositoryCommit commit,
-			Dictionary<string, MethodDef> rootMethods,
-			Dictionary<string, ILPatchMethodChange> parent,
-			Dictionary<string, ILPatchMethodChange> current) {
-			var keys = new SortedSet<string>(parent.Keys, StringComparer.Ordinal);
-			keys.UnionWith(current.Keys);
-			foreach (string key in keys) {
-				var rootSnapshot = CreateSnapshot(rootMethods[key]);
-				string before = parent.TryGetValue(key, out var parentChange)
-					? parentChange.PatchedBody.CanonicalHash
-					: rootSnapshot.CanonicalHash;
-				string after = current.TryGetValue(key, out var currentChange)
-					? currentChange.PatchedBody.CanonicalHash
-					: rootSnapshot.CanonicalHash;
-				if (StringComparer.Ordinal.Equals(before, after))
-					continue;
-
-				ILPatchRepositoryMethodChangeKind kind;
-				bool beforeRoot = StringComparer.Ordinal.Equals(before, rootSnapshot.CanonicalHash);
-				bool afterRoot = StringComparer.Ordinal.Equals(after, rootSnapshot.CanonicalHash);
-				if (beforeRoot && !afterRoot)
-					kind = ILPatchRepositoryMethodChangeKind.AddedChange;
-				else if (!beforeRoot && afterRoot)
-					kind = ILPatchRepositoryMethodChangeKind.Reverted;
-				else
-					kind = ILPatchRepositoryMethodChangeKind.Modified;
-
-				commit.Changes.Add(new ILPatchRepositoryMethodSummary {
-					Target = currentChange?.Target ?? parentChange?.Target ?? rootSnapshot.Method,
-					Kind = kind,
-					BeforeHash = before,
-					AfterHash = after,
-				});
-			}
-		}
 
 		static ILPatchMethodBodySnapshot CreateSnapshot(MethodDef method) {
 			if (method.Body is null)
