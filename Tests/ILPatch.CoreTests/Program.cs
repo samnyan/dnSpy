@@ -30,6 +30,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(ManualOverrideRejectsSignatureChange), ManualOverrideRejectsSignatureChange),
 				(nameof(UpdatedDefinitionPersistsManualRenamedTarget), UpdatedDefinitionPersistsManualRenamedTarget),
 				(nameof(UpdatedDefinitionRebasesCleanUpstreamChange), UpdatedDefinitionRebasesCleanUpstreamChange),
+				(nameof(UpdatedDefinitionPreservesStructuralChanges), UpdatedDefinitionPreservesStructuralChanges),
 				(nameof(HeadlessApplyExactMutatesTarget), HeadlessApplyExactMutatesTarget),
 				(nameof(HeadlessApplyCleanRebasePreservesUpstream), HeadlessApplyCleanRebasePreservesUpstream),
 				(nameof(HeadlessConflictDoesNotMutateTarget), HeadlessConflictDoesNotMutateTarget),
@@ -47,6 +48,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(HeadlessApplyReplaysEventWithAccessors), HeadlessApplyReplaysEventWithAccessors),
 				(nameof(HeadlessApplyReplaysAddedType), HeadlessApplyReplaysAddedType),
 				(nameof(HeadlessApplyReplaysRemovedType), HeadlessApplyReplaysRemovedType),
+				(nameof(HeadlessApplyReplaysNestedType), HeadlessApplyReplaysNestedType),
 				(nameof(SerializerReadsLegacyV1Document), SerializerReadsLegacyV1Document),
 				(nameof(DocumentCreatorRejectsMethodFlagChange), DocumentCreatorRejectsMethodFlagChange),
 				(nameof(DocumentCreatorDiskRoundTripCapturesBodyChange), DocumentCreatorDiskRoundTripCapturesBodyChange),
@@ -57,6 +59,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(InlineDiffLeavesIdenticalLineUnchanged), InlineDiffLeavesIdenticalLineUnchanged),
 				(nameof(RepositoryCommitHistoryAndExportRoundTrip), RepositoryCommitHistoryAndExportRoundTrip),
 				(nameof(RepositoryStructuralCommitRoundTrip), RepositoryStructuralCommitRoundTrip),
+				(nameof(RepositoryWholeTypeCommitRoundTrip), RepositoryWholeTypeCommitRoundTrip),
 				(nameof(RepositoryRejectsDivergedWorkingTree), RepositoryRejectsDivergedWorkingTree),
 				(nameof(RepositoryCommitCanRevertParentChange), RepositoryCommitCanRevertParentChange),
 				(nameof(RepositoryCommitDeltaUsesParentState), RepositoryCommitDeltaUsesParentState),
@@ -662,6 +665,29 @@ namespace dnSpy.AsmEditor.ILPatch {
 				"Rebased patch must apply the original constant edit on top of upstream IL.");
 		}
 
+
+		static void UpdatedDefinitionPreservesStructuralChanges() {
+			var oldTarget = CreateNamedIntMethod("Run", 1);
+			var patch = CreateRealBodyConstantPatch(oldTarget, 2);
+			var document = new ILPatchDocument();
+			document.Methods.Add(patch);
+			document.TypeChanges.Add(new ILPatchTypeChange {
+				Target = ILPatchTypeIdentity.Create(oldTarget.DeclaringType!),
+			});
+			document.TypeChanges[0].RemovedFields.Add(new ILPatchFieldIdentity {
+				DeclaringType = ILPatchTypeIdentity.Create(oldTarget.DeclaringType!),
+				Name = "Old",
+				FieldType = "System.Int32",
+			});
+
+			var current = CreateNamedIntMethod("Run", 1);
+			var preview = ILPatchImportMatcher.CreatePreview(document, new[] { current.Module });
+			var updated = ILPatchDefinitionRebaser.CreateUpdatedDocument(preview, out _);
+			Equal(1, updated.TypeChanges.Count, "Export Rebased must preserve structural type records.");
+			Equal(1, updated.TypeChanges[0].RemovedFields.Count,
+				"Export Rebased must not strip structural member operations.");
+		}
+
 		static void HeadlessApplyExactMutatesTarget() {
 			var oldTarget = CreateNamedIntMethod("Run", 1);
 			var patch = CreateRealBodyConstantPatch(oldTarget, 2);
@@ -1074,6 +1100,31 @@ namespace dnSpy.AsmEditor.ILPatch {
 				"Removed type should disappear after replay.");
 		}
 
+
+		static void HeadlessApplyReplaysNestedType() {
+			var originalMethod = CreateNamedIntMethod("Run", 1);
+			var modifiedMethod = CreateNamedIntMethod("Run", 1);
+			var parent = modifiedMethod.DeclaringType!;
+			var nested = new TypeDefUser(UTF8String.Empty, "NestedAdded", modifiedMethod.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.NestedPublic | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			parent.NestedTypes.Add(nested);
+			AddConstantMethod(nested, "Value", 55);
+
+			True(ILPatchDocumentCreator.TryCreate(originalMethod.Module, modifiedMethod.Module, "nested-type",
+				out var document, out var report), string.Join(" ", report.UnsupportedReasons));
+			NotNull(document, "Nested type patch should be created.");
+			var added = document!.TypeChanges.Single(a => a.Kind == ILPatchTypeChangeKind.Add);
+			NotNull(added.TypeDefinition?.DeclaringType, "Nested type snapshot must preserve its parent identity.");
+
+			var apply = ILPatchHeadlessApplier.Apply(originalMethod.Module, document);
+			True(apply.Success, apply.StructuralMessage);
+			var replayedParent = originalMethod.DeclaringType!;
+			var replayed = replayedParent.NestedTypes.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "NestedAdded"));
+			Equal(55L, CilNormalizer.CreateSnapshot(replayed.Methods.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Value"))).Instructions[0].Operand.IntegerValue,
+				"Nested type method body should survive replay.");
+		}
+
 		static void SerializerReadsLegacyV1Document() {
 			var method = CreateNamedIntMethod("Run", 1);
 			var patch = CreateRealBodyConstantPatch(method, 2);
@@ -1225,6 +1276,41 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 				var delta = repository.CreateCommitDelta(repository.Metadata.HeadCommitId!);
 				Equal(1, delta.TypeChanges.Count, "Parent-to-commit review should reconstruct structural changes.");
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+
+		static void RepositoryWholeTypeCommitRoundTrip() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-whole-type-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+				using (var working = ModuleDefMD.Load(workingPath)) {
+					var type = new TypeDefUser("Tests", "FeatureType", working.CorLibTypes.Object.TypeDefOrRef) {
+						Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+					};
+					working.Types.Add(type);
+					AddConstantMethod(type, "Version", 77);
+					var commit = repository.Commit(working, Array.Empty<ILPatchMethodChange>(), "add feature type");
+					True(commit.StructuralChanges.Any(a => a.Kind == ILPatchRepositoryStructuralChangeKind.AddedType),
+						"Repository summary should identify a whole-type addition.");
+				}
+
+				string output = Path.Combine(directory, "whole-type.dll");
+				repository.Export(repository.Metadata.HeadCommitId, output);
+				using var exported = ModuleDefMD.Load(output);
+				var replayed = exported.GetTypes().Single(a => StringComparer.Ordinal.Equals(a.FullName, "Tests.FeatureType"));
+				Equal(77L, CilNormalizer.CreateSnapshot(replayed.Methods.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Version"))).Instructions[0].Operand.IntegerValue,
+					"Repository export should materialize a whole added type.");
+				var restore = repository.CreateRestorePatch(exported, null);
+				True(restore.TypeChanges.Any(a => a.Kind == ILPatchTypeChangeKind.Remove),
+					"Restoring ROOT from a whole-type commit should encode a type removal.");
 			}
 			finally {
 				if (Directory.Exists(directory))
