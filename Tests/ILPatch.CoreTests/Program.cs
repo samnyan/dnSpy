@@ -53,6 +53,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(HeadlessStructuralConflictRollsBackAdditions), HeadlessStructuralConflictRollsBackAdditions),
 				(nameof(HeadlessWholeTypeAddRejectsExistingType), HeadlessWholeTypeAddRejectsExistingType),
 				(nameof(HeadlessWholeTypeRemoveRejectsChangedType), HeadlessWholeTypeRemoveRejectsChangedType),
+				(nameof(HeadlessWholeTypeRemoveRejectsAddedNestedType), HeadlessWholeTypeRemoveRejectsAddedNestedType),
 				(nameof(HeadlessRemovedMethodRejectsChangedBody), HeadlessRemovedMethodRejectsChangedBody),
 				(nameof(HeadlessRemovedFieldRejectsChangedMetadata), HeadlessRemovedFieldRejectsChangedMetadata),
 				(nameof(SerializerReadsLegacyV1Document), SerializerReadsLegacyV1Document),
@@ -1271,6 +1272,52 @@ namespace dnSpy.AsmEditor.ILPatch {
 				"Removal conflict should explain the structural baseline mismatch.");
 		}
 
+
+
+		static void HeadlessWholeTypeRemoveRejectsAddedNestedType() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var parent = new TypeDefUser("Tests", "NestedGuardParent", original.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			original.Module.Types.Add(parent);
+			var originalChild = new TypeDefUser(UTF8String.Empty, "OriginalChild", original.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.NestedPublic | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			parent.NestedTypes.Add(originalChild);
+
+			var modified = CreateNamedIntMethod("Run", 1);
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "remove-nested-guard",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Whole-type removal with nested members should create a patch.");
+			var parentRemoval = document!.TypeChanges.Single(a =>
+				a.Kind == ILPatchTypeChangeKind.Remove &&
+				StringComparer.Ordinal.Equals(a.Target.FullName, "Tests.NestedGuardParent"));
+			True(parentRemoval.TypeDefinition?.NestedTypes is not null &&
+				parentRemoval.TypeDefinition.NestedTypes.Count == 1,
+				"New whole-type snapshots must record direct nested membership.");
+
+			var current = CreateNamedIntMethod("Run", 1);
+			var currentParent = new TypeDefUser("Tests", "NestedGuardParent", current.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			current.Module.Types.Add(currentParent);
+			currentParent.NestedTypes.Add(new TypeDefUser(UTF8String.Empty, "OriginalChild",
+				current.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.NestedPublic | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			});
+			currentParent.NestedTypes.Add(new TypeDefUser(UTF8String.Empty, "UpstreamChild",
+				current.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.NestedPublic | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			});
+
+			var report = ILPatchHeadlessApplier.Apply(current.Module, document);
+			False(report.Success,
+				"Whole-type removal must fail if a newer build added a nested type under the removed parent.");
+			True(current.Module.Types.Any(a => StringComparer.Ordinal.Equals(a.FullName, "Tests.NestedGuardParent")),
+				"Rejected parent removal must preserve the parent and its upstream nested type.");
+			True(currentParent.NestedTypes.Any(a => StringComparer.Ordinal.Equals(a.Name?.String, "UpstreamChild")),
+				"Rejected parent removal must preserve the upstream nested type.");
+		}
 
 		static void HeadlessRemovedMethodRejectsChangedBody() {
 			var original = CreateNamedIntMethod("Run", 1);

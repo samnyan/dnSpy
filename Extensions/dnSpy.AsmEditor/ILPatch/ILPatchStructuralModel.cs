@@ -179,6 +179,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public uint Attributes { get; set; }
 		public ILPatchTypeSigSnapshot? BaseType { get; set; }
 		public ILPatchTypeIdentity? DeclaringType { get; set; }
+		public List<ILPatchTypeIdentity>? NestedTypes { get; set; }
 		public List<ILPatchFieldDefinitionSnapshot> Fields { get; } = new List<ILPatchFieldDefinitionSnapshot>();
 		public List<ILPatchMethodDefinitionSnapshot> Methods { get; } = new List<ILPatchMethodDefinitionSnapshot>();
 		public List<ILPatchPropertyDefinitionSnapshot> Properties { get; } = new List<ILPatchPropertyDefinitionSnapshot>();
@@ -262,7 +263,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				throw new ArgumentNullException(nameof(expected));
 			if (current is null)
 				throw new ArgumentNullException(nameof(current));
-			return Compare(TypeFingerprint(expected), TypeFingerprint(current),
+			bool includeNestedTypes = expected.NestedTypes is not null;
+			return Compare(TypeFingerprint(expected, includeNestedTypes), TypeFingerprint(current, includeNestedTypes),
 				"The target type no longer matches the structural baseline captured by this patch.", out reason);
 		}
 
@@ -275,7 +277,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			return false;
 		}
 
-		static string TypeFingerprint(ILPatchTypeDefinitionSnapshot type) =>
+		static string TypeFingerprint(ILPatchTypeDefinitionSnapshot type, bool includeNestedTypes) =>
 			string.Join("|", new[] {
 				type.Identity.ToCanonicalString(),
 				type.Namespace ?? string.Empty,
@@ -283,6 +285,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				type.Attributes.ToString(System.Globalization.CultureInfo.InvariantCulture),
 				TypeSigFingerprint(type.BaseType),
 				type.DeclaringType?.ToCanonicalString() ?? string.Empty,
+				includeNestedTypes
+					? JoinSorted((type.NestedTypes ?? new List<ILPatchTypeIdentity>()).Select(a => a.ToCanonicalString()))
+					: string.Empty,
 				JoinSorted(type.Fields.Select(FieldFingerprint)),
 				JoinSorted(type.Methods.Select(MethodFingerprint)),
 				JoinSorted(type.Properties.Select(PropertyFingerprint)),
@@ -373,6 +378,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Attributes = (uint)type.Attributes,
 				BaseType = baseType,
 				DeclaringType = type.DeclaringType is null ? null : ILPatchTypeIdentity.Create(type.DeclaringType),
+				NestedTypes = type.NestedTypes.Select(ILPatchTypeIdentity.Create).ToList(),
 			};
 
 			foreach (var field in type.Fields) {
