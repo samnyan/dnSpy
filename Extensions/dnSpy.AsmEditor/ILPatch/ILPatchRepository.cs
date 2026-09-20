@@ -413,12 +413,20 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		public void Export(string? commitId, string outputPath) {
+			ValidateRootIntegrity();
 			outputPath = Path.GetFullPath(outputPath ?? throw new ArgumentNullException(nameof(outputPath)));
 			if (StringComparer.OrdinalIgnoreCase.Equals(outputPath, RootModulePath))
 				throw new InvalidOperationException("Export path must not overwrite the repository root assembly.");
 			string? outputDirectory = Path.GetDirectoryName(outputPath);
 			if (!string.IsNullOrEmpty(outputDirectory))
 				Directory.CreateDirectory(outputDirectory);
+
+			// ROOT is an immutable byte-for-byte capture of the original DLL. Preserve that exact
+			// file when exporting ROOT instead of round-tripping it through dnlib.
+			if (string.IsNullOrEmpty(commitId)) {
+				File.Copy(RootModulePath, outputPath, true);
+				return;
+			}
 
 			using var module = MaterializeState(commitId);
 			module.Write(outputPath);
