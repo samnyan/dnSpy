@@ -163,6 +163,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 		}
 
+		static int GetTypeDepth(TypeDef type) {
+			int depth = 0;
+			for (var current = type.DeclaringType2; current is not null; current = current.DeclaringType2)
+				depth++;
+			return depth;
+		}
+
 		public static bool TryPrepare(ModuleDef module, IReadOnlyList<ILPatchTypeChange> changes,
 			out Plan? plan, out string error) {
 			if (module is null)
@@ -259,7 +266,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 							error = $"Removed type '{change.Target}' is not attached to its expected owner.";
 							return false;
 						}
-						removedTypes.Add((parent, type, index, TypeDepth(type)));
+						removedTypes.Add((parent, type, index, GetTypeDepth(type)));
 						continue;
 					}
 				}
