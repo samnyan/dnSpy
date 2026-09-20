@@ -337,8 +337,82 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 		}
 
-		public void Export(string? commitId, string outputPath) {
+		public ModuleDefMD MaterializeState(string? commitId) {
 			ValidateRootIntegrity();
+			var module = ModuleDefMD.Load(RootModulePath);
+			try {
+				if (string.IsNullOrEmpty(commitId)) {
+					string rootState = ILPatchModuleStateHasher.Compute(module);
+					if (!StringComparer.Ordinal.Equals(rootState, Metadata.RootStateHash))
+						throw new InvalidDataException("Repository ROOT failed semantic state verification.");
+					return module;
+				}
+
+				var commit = LoadCommit(commitId);
+				var document = LoadCommitPatch(commitId);
+				var report = ILPatchHeadlessApplier.Apply(module, document);
+				if (!report.Success) {
+					string details = string.Join("; ", report.Entries
+						.Where(a => a.Action == ILPatchHeadlessAction.Unresolved)
+						.Select(a => a.Message));
+					throw new InvalidOperationException(
+						"Could not materialize repository commit from the immutable root: " + details);
+				}
+				string state = ILPatchModuleStateHasher.Compute(module);
+				if (!StringComparer.Ordinal.Equals(state, commit.StateHash)) {
+					throw new InvalidDataException(
+						$"Repository commit {ShortHash(commit.Id)} failed state verification. " +
+						"The stored patch or commit metadata may be corrupted.");
+				}
+				return module;
+			}
+			catch {
+				module.Dispose();
+				throw;
+			}
+		}
+
+		public ILPatchDocument CreateRestorePatch(ModuleDef currentModule, string? commitId) {
+			if (currentModule is null)
+				throw new ArgumentNullException(nameof(currentModule));
+
+			using var desiredModule = MaterializeState(commitId);
+			var currentMethods = BuildMethodMap(currentModule);
+			var desiredMethods = BuildMethodMap(desiredModule);
+			ValidateMethodShape(desiredMethods, currentMethods);
+
+			var result = new ILPatchDocument {
+				Name = string.IsNullOrEmpty(commitId)
+					? "Restore repository ROOT"
+					: "Restore repository " + ShortHash(commitId),
+				CreatedUtc = DateTime.UtcNow,
+			};
+
+			foreach (var pair in desiredMethods.OrderBy(a => a.Key, StringComparer.Ordinal)) {
+				var desired = pair.Value;
+				var current = currentMethods[pair.Key];
+				if (desired.Body is null)
+					continue;
+
+				var before = CreateSnapshot(current);
+				var after = CreateSnapshot(desired);
+				if (StringComparer.Ordinal.Equals(before.CanonicalHash, after.CanonicalHash))
+					continue;
+
+				// Restore patches target the currently loaded method identity/module while preserving
+				// the selected repository state's portable body snapshot.
+				after.Method = before.Method;
+				result.Methods.Add(new ILPatchMethodChange {
+					Target = before.Method,
+					BaseModuleMvid = currentModule.Mvid ?? Guid.Empty,
+					BaseBody = before,
+					PatchedBody = after,
+				});
+			}
+			return result;
+		}
+
+		public void Export(string? commitId, string outputPath) {
 			outputPath = Path.GetFullPath(outputPath ?? throw new ArgumentNullException(nameof(outputPath)));
 			if (StringComparer.OrdinalIgnoreCase.Equals(outputPath, RootModulePath))
 				throw new InvalidOperationException("Export path must not overwrite the repository root assembly.");
@@ -346,27 +420,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (!string.IsNullOrEmpty(outputDirectory))
 				Directory.CreateDirectory(outputDirectory);
 
-			if (string.IsNullOrEmpty(commitId)) {
-				File.Copy(RootModulePath, outputPath, true);
-				return;
-			}
-
-			var commit = LoadCommit(commitId);
-			var document = LoadCommitPatch(commitId);
-			using var module = ModuleDefMD.Load(RootModulePath);
-			var report = ILPatchHeadlessApplier.Apply(module, document);
-			if (!report.Success) {
-				string details = string.Join("; ", report.Entries
-					.Where(a => a.Action == ILPatchHeadlessAction.Unresolved)
-					.Select(a => a.Message));
-				throw new InvalidOperationException("Could not materialize repository commit from the immutable root: " + details);
-			}
-			string exportedState = ILPatchModuleStateHasher.Compute(module);
-			if (!StringComparer.Ordinal.Equals(exportedState, commit.StateHash)) {
-				throw new InvalidDataException(
-					$"Repository commit {ShortHash(commit.Id)} failed state verification. " +
-					"The stored patch or commit metadata may be corrupted.");
-			}
+			using var module = MaterializeState(commitId);
 			module.Write(outputPath);
 		}
 
