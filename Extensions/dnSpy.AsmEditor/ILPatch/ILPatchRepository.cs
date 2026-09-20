@@ -42,6 +42,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		RemovedProperty,
 		AddedEvent,
 		RemovedEvent,
+		AddedType,
+		RemovedType,
 	}
 
 	sealed class ILPatchRepositoryStructuralSummary {
@@ -437,6 +439,22 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 
 			foreach (var typeChange in delta.TypeChanges) {
+				if (typeChange.Kind == ILPatchTypeChangeKind.Add) {
+					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
+						Kind = ILPatchRepositoryStructuralChangeKind.AddedType,
+						DeclaringType = typeChange.TypeDefinition?.DeclaringType ?? typeChange.Target,
+						Member = typeChange.Target.ToString(),
+					});
+					continue;
+				}
+				if (typeChange.Kind == ILPatchTypeChangeKind.Remove) {
+					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
+						Kind = ILPatchRepositoryStructuralChangeKind.RemovedType,
+						DeclaringType = typeChange.TypeDefinition?.DeclaringType ?? typeChange.Target,
+						Member = typeChange.Target.ToString(),
+					});
+					continue;
+				}
 				foreach (var field in typeChange.AddedFields)
 					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
 						Kind = ILPatchRepositoryStructuralChangeKind.AddedField,

@@ -526,11 +526,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 			UpdateCommitButton();
 		}
 
-		static string DescribeStructuralChange(ILPatchTypeChange change) =>
-			$"+{change.AddedFields.Count} field / -{change.RemovedFields.Count} field / " +
-			$"+{change.AddedMethods.Count} method / -{change.RemovedMethods.Count} method / " +
-			$"+{change.AddedProperties.Count} property / -{change.RemovedProperties.Count} property / " +
-			$"+{change.AddedEvents.Count} event / -{change.RemovedEvents.Count} event";
+		static string DescribeStructuralChange(ILPatchTypeChange change) {
+			if (change.Kind == ILPatchTypeChangeKind.Add)
+				return "add complete type";
+			if (change.Kind == ILPatchTypeChangeKind.Remove)
+				return "remove complete type";
+			return $"+{change.AddedFields.Count} field / -{change.RemovedFields.Count} field / " +
+				$"+{change.AddedMethods.Count} method / -{change.RemovedMethods.Count} method / " +
+				$"+{change.AddedProperties.Count} property / -{change.RemovedProperties.Count} property / " +
+				$"+{change.AddedEvents.Count} event / -{change.RemovedEvents.Count} event";
+		}
 
 		void WorkingChangesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
 			compareWorkingChangeButton.IsEnabled =
