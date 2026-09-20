@@ -53,6 +53,53 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public override string ToString() => $"{DeclaringType}::{Name}: {FieldType}";
 	}
 
+
+	sealed class ILPatchPropertyIdentity {
+		public ILPatchTypeIdentity DeclaringType { get; set; } = null!;
+		public string Name { get; set; } = string.Empty;
+		public bool HasThis { get; set; }
+		public string ReturnType { get; set; } = string.Empty;
+		public List<string> Parameters { get; } = new List<string>();
+
+		public static ILPatchPropertyIdentity Create(PropertyDef property) {
+			if (property is null)
+				throw new ArgumentNullException(nameof(property));
+			var result = new ILPatchPropertyIdentity {
+				DeclaringType = ILPatchTypeIdentity.Create(property.DeclaringType),
+				Name = property.Name?.String ?? string.Empty,
+				HasThis = property.Type?.HasThis == true,
+				ReturnType = property.Type?.RetType?.FullName ?? string.Empty,
+			};
+			if (property.Type is not null)
+				result.Parameters.AddRange(property.Type.Params.Select(a => a.FullName ?? string.Empty));
+			return result;
+		}
+
+		public string ToCanonicalString() =>
+			$"{DeclaringType.ToCanonicalString()}::{Name}|this={HasThis}|ret={ReturnType}|args={string.Join(",", Parameters)}";
+		public override string ToString() => $"{DeclaringType}::{Name}";
+	}
+
+	sealed class ILPatchEventIdentity {
+		public ILPatchTypeIdentity DeclaringType { get; set; } = null!;
+		public string Name { get; set; } = string.Empty;
+		public string EventType { get; set; } = string.Empty;
+
+		public static ILPatchEventIdentity Create(EventDef @event) {
+			if (@event is null)
+				throw new ArgumentNullException(nameof(@event));
+			return new ILPatchEventIdentity {
+				DeclaringType = ILPatchTypeIdentity.Create(@event.DeclaringType),
+				Name = @event.Name?.String ?? string.Empty,
+				EventType = @event.EventType?.FullName ?? string.Empty,
+			};
+		}
+
+		public string ToCanonicalString() =>
+			$"{DeclaringType.ToCanonicalString()}::{Name}:{EventType}";
+		public override string ToString() => $"{DeclaringType}::{Name}";
+	}
+
 	enum ILPatchTypeSigKind {
 		Named,
 		GenericTypeParameter,
@@ -91,6 +138,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public List<ILPatchTypeSigSnapshot> ParametersAfterSentinel { get; } = new List<ILPatchTypeSigSnapshot>();
 	}
 
+	sealed class ILPatchPropertySignatureSnapshot {
+		public bool HasThis { get; set; }
+		public ILPatchTypeSigSnapshot ReturnType { get; set; } = null!;
+		public List<ILPatchTypeSigSnapshot> Parameters { get; } = new List<ILPatchTypeSigSnapshot>();
+	}
+
 	sealed class ILPatchParameterSnapshot {
 		public ushort Sequence { get; set; }
 		public string Name { get; set; } = string.Empty;
@@ -112,6 +165,25 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public ILPatchMethodBodySnapshot? Body { get; set; }
 	}
 
+	sealed class ILPatchPropertyDefinitionSnapshot {
+		public ILPatchPropertyIdentity Identity { get; set; } = null!;
+		public ushort Attributes { get; set; }
+		public ILPatchPropertySignatureSnapshot Signature { get; set; } = null!;
+		public List<ILPatchMethodIdentity> GetMethods { get; } = new List<ILPatchMethodIdentity>();
+		public List<ILPatchMethodIdentity> SetMethods { get; } = new List<ILPatchMethodIdentity>();
+		public List<ILPatchMethodIdentity> OtherMethods { get; } = new List<ILPatchMethodIdentity>();
+	}
+
+	sealed class ILPatchEventDefinitionSnapshot {
+		public ILPatchEventIdentity Identity { get; set; } = null!;
+		public ushort Attributes { get; set; }
+		public ILPatchTypeSigSnapshot EventType { get; set; } = null!;
+		public ILPatchMethodIdentity? AddMethod { get; set; }
+		public ILPatchMethodIdentity? InvokeMethod { get; set; }
+		public ILPatchMethodIdentity? RemoveMethod { get; set; }
+		public List<ILPatchMethodIdentity> OtherMethods { get; } = new List<ILPatchMethodIdentity>();
+	}
+
 	/// <summary>
 	/// Structural changes are grouped by declaring type. Existing method-body edits remain in
 	/// ILPatchDocument.Methods; this collection represents member topology changes around them.
@@ -123,10 +195,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public List<ILPatchFieldIdentity> RemovedFields { get; } = new List<ILPatchFieldIdentity>();
 		public List<ILPatchMethodDefinitionSnapshot> AddedMethods { get; } = new List<ILPatchMethodDefinitionSnapshot>();
 		public List<ILPatchMethodIdentity> RemovedMethods { get; } = new List<ILPatchMethodIdentity>();
+		public List<ILPatchPropertyDefinitionSnapshot> AddedProperties { get; } = new List<ILPatchPropertyDefinitionSnapshot>();
+		public List<ILPatchPropertyIdentity> RemovedProperties { get; } = new List<ILPatchPropertyIdentity>();
+		public List<ILPatchEventDefinitionSnapshot> AddedEvents { get; } = new List<ILPatchEventDefinitionSnapshot>();
+		public List<ILPatchEventIdentity> RemovedEvents { get; } = new List<ILPatchEventIdentity>();
 
 		public bool HasEffectiveChange =>
 			AddedFields.Count != 0 || RemovedFields.Count != 0 ||
-			AddedMethods.Count != 0 || RemovedMethods.Count != 0;
+			AddedMethods.Count != 0 || RemovedMethods.Count != 0 ||
+			AddedProperties.Count != 0 || RemovedProperties.Count != 0 ||
+			AddedEvents.Count != 0 || RemovedEvents.Count != 0;
 	}
 
 	static class ILPatchStructuralSnapshotBuilder {
@@ -151,6 +229,88 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Attributes = (ushort)field.Attributes,
 				FieldType = fieldType!,
 			};
+			return true;
+		}
+
+
+		public static bool TryCreateProperty(PropertyDef property,
+			out ILPatchPropertyDefinitionSnapshot? snapshot, out string error) {
+			snapshot = null;
+			error = string.Empty;
+			if (property is null) {
+				error = "Property is missing.";
+				return false;
+			}
+			if (property.HasCustomAttributes || property.Constant is not null) {
+				error = $"Property '{property.FullName}' uses custom attributes or a constant that structural patch v2 does not capture yet.";
+				return false;
+			}
+			if (property.Type is null || property.Type.RetType is null) {
+				error = $"Property '{property.FullName}' has no usable signature.";
+				return false;
+			}
+			if (property.Type.ExplicitThis) {
+				error = $"Property '{property.FullName}' uses ExplicitThis, which structural patch v2 does not capture yet.";
+				return false;
+			}
+			if (!TryCreateTypeSig(property.Type.RetType, out var returnType, out error))
+				return false;
+			var signature = new ILPatchPropertySignatureSnapshot {
+				HasThis = property.Type.HasThis,
+				ReturnType = returnType!,
+			};
+			foreach (var parameter in property.Type.Params) {
+				if (!TryCreateTypeSig(parameter, out var parameterType, out error))
+					return false;
+				signature.Parameters.Add(parameterType!);
+			}
+			var result = new ILPatchPropertyDefinitionSnapshot {
+				Identity = ILPatchPropertyIdentity.Create(property),
+				Attributes = (ushort)property.Attributes,
+				Signature = signature,
+			};
+			result.GetMethods.AddRange(property.GetMethods.Select(ILPatchMethodIdentity.Create));
+			result.SetMethods.AddRange(property.SetMethods.Select(ILPatchMethodIdentity.Create));
+			result.OtherMethods.AddRange(property.OtherMethods.Select(ILPatchMethodIdentity.Create));
+			snapshot = result;
+			return true;
+		}
+
+		public static bool TryCreateEvent(EventDef @event,
+			out ILPatchEventDefinitionSnapshot? snapshot, out string error) {
+			snapshot = null;
+			error = string.Empty;
+			if (@event is null) {
+				error = "Event is missing.";
+				return false;
+			}
+			if (@event.HasCustomAttributes) {
+				error = $"Event '{@event.FullName}' uses custom attributes that structural patch v2 does not capture yet.";
+				return false;
+			}
+			if (@event.EventType is null) {
+				error = $"Event '{@event.FullName}' has no event type.";
+				return false;
+			}
+			TypeSig eventTypeSig;
+			if (@event.EventType is TypeSpec typeSpec)
+				eventTypeSig = typeSpec.TypeSig;
+			else if (@event.EventType.ResolveTypeDef()?.IsValueType == true)
+				eventTypeSig = new ValueTypeSig(@event.EventType);
+			else
+				eventTypeSig = new ClassSig(@event.EventType);
+			if (!TryCreateTypeSig(eventTypeSig, out var eventType, out error))
+				return false;
+			var result = new ILPatchEventDefinitionSnapshot {
+				Identity = ILPatchEventIdentity.Create(@event),
+				Attributes = (ushort)@event.Attributes,
+				EventType = eventType!,
+				AddMethod = @event.AddMethod is null ? null : ILPatchMethodIdentity.Create(@event.AddMethod),
+				InvokeMethod = @event.InvokeMethod is null ? null : ILPatchMethodIdentity.Create(@event.InvokeMethod),
+				RemoveMethod = @event.RemoveMethod is null ? null : ILPatchMethodIdentity.Create(@event.RemoveMethod),
+			};
+			result.OtherMethods.AddRange(@event.OtherMethods.Select(ILPatchMethodIdentity.Create));
+			snapshot = result;
 			return true;
 		}
 
