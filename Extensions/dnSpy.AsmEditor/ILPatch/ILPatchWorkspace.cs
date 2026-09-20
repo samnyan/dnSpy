@@ -34,8 +34,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		sealed class TrackedMethod {
 			public MethodDef Method { get; }
-			public ILPatchMethodBodySnapshot Baseline { get; }
-			public MethodBodyOptions BaselineOptions { get; }
+			public ILPatchMethodBodySnapshot Baseline { get; set; }
+			public MethodBodyOptions BaselineOptions { get; set; }
 			public ILPatchMethodBodySnapshot Current { get; set; }
 
 			public TrackedMethod(MethodDef method, ILPatchMethodBodySnapshot baseline, MethodBodyOptions baselineOptions) {
@@ -209,24 +209,56 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		/// <summary>
-		/// Marks one module's current in-memory state as the new clean working baseline after a
-		/// repository commit. Tracking entries are removed so the next edit captures the committed
-		/// state as a fresh baseline. Durable history now lives in .dnspy, so this module's session
-		/// edit rows are cleared as well.
+		/// Marks all tracked methods in one module as the new clean working baseline after a full
+		/// repository commit. Tracking stays alive so a later dnSpy Undo/Redo can immediately
+		/// become a working-tree change relative to the committed HEAD.
 		/// </summary>
 		public void AcceptModuleAsBaseline(ModuleDef module) {
 			if (module is null)
 				throw new ArgumentNullException(nameof(module));
+			AcceptChangesAsBaseline(module,
+				trackedMethods.Values
+					.Where(a => ReferenceEquals(a.Method.Module, module))
+					.Select(a => a.Baseline.Method)
+					.ToArray());
+		}
+
+		/// <summary>
+		/// Marks only selected methods as committed. Their baseline is reset to the current body
+		/// but tracking remains active; unselected methods keep their older baseline/current state.
+		/// This mirrors Git: commit makes staged paths clean, while a subsequent Undo/edit makes
+		/// them dirty again relative to the new HEAD.
+		/// </summary>
+		public void AcceptChangesAsBaseline(ModuleDef module,
+			IEnumerable<ILPatchMethodIdentity> committedMethods) {
+			if (module is null)
+				throw new ArgumentNullException(nameof(module));
+			if (committedMethods is null)
+				throw new ArgumentNullException(nameof(committedMethods));
+
+			var keys = new HashSet<string>(
+				committedMethods.Select(a => a.ToCanonicalString()), StringComparer.Ordinal);
+			if (keys.Count == 0)
+				return;
 
 			bool changed = false;
-			foreach (var method in trackedMethods.Keys
-				.Where(a => ReferenceEquals(a.Module, module))
+			foreach (var tracked in trackedMethods.Values
+				.Where(a => ReferenceEquals(a.Method.Module, module) &&
+					keys.Contains(a.Baseline.Method.ToCanonicalString()))
 				.ToArray()) {
-				trackedMethods.Remove(method);
-				pendingMutations.Remove(method);
+				if (tracked.Method.Body is null)
+					continue;
+				var baseline = CreateWorkspaceSnapshot(tracked.Method);
+				tracked.Baseline = baseline;
+				tracked.Current = baseline;
+				tracked.BaselineOptions = new MethodBodyOptions(tracked.Method);
+				pendingMutations.Remove(tracked.Method);
 				changed = true;
 			}
-			int removedHistory = history.RemoveAll(a => ReferenceEquals(a.SourceModule, module));
+
+			int removedHistory = history.RemoveAll(a =>
+				ReferenceEquals(a.SourceModule, module) &&
+				keys.Contains(a.Method.ToCanonicalString()));
 			changed |= removedHistory != 0;
 			if (changed)
 				Changed?.Invoke(this, EventArgs.Empty);

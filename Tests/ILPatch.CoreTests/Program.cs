@@ -50,6 +50,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(RepositoryRejectsDivergedWorkingTree), RepositoryRejectsDivergedWorkingTree),
 				(nameof(RepositoryCommitCanRevertParentChange), RepositoryCommitCanRevertParentChange),
 				(nameof(RepositoryCommitDeltaUsesParentState), RepositoryCommitDeltaUsesParentState),
+				(nameof(RepositorySelectiveCommitLeavesUnstagedChange), RepositorySelectiveCommitLeavesUnstagedChange),
+				(nameof(RepositorySelectiveCommitRejectsStaleSelection), RepositorySelectiveCommitRejectsStaleSelection),
 				(nameof(RepositoryDetectsTamperedRoot), RepositoryDetectsTamperedRoot),
 			};
 
@@ -910,6 +912,93 @@ namespace dnSpy.AsmEditor.ILPatch {
 					threw = true;
 				}
 				True(threw, "Commit itself must fail closed on a diverged working tree.");
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+		static void RepositorySelectiveCommitLeavesUnstagedChange() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-selective-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+
+				using var working = ModuleDefMD.Load(workingPath);
+				var firstChange = CreateWorkingConstantChange(FindFixtureMethod(working, "First"), 2);
+				var secondChange = CreateWorkingConstantChange(FindFixtureMethod(working, "Second"), 20);
+				var all = new[] { firstChange, secondChange };
+
+				var firstCommit = repository.CommitSelected(working, all, new[] { firstChange }, "stage first only");
+				Equal(1, firstCommit.Changes.Count,
+					"Selective commit should summarize only the staged method.");
+				Equal("First", firstCommit.Changes[0].Target.MethodName,
+					"First selective commit should contain First().");
+
+				string firstExport = Path.Combine(directory, "first-selected.dll");
+				repository.Export(firstCommit.Id, firstExport);
+				VerifyFixtureConstants(firstExport, 2, 10);
+
+				// The in-memory working module still contains the unstaged Second()=20 edit. Its
+				// stored working baseline is still 10, which remains unchanged in the new HEAD.
+				var secondCommit = repository.CommitSelected(
+					working,
+					new[] { secondChange },
+					new[] { secondChange },
+					"commit remaining second");
+				Equal(firstCommit.Id, secondCommit.ParentId,
+					"Second selective commit should advance from the first selective HEAD.");
+
+				string headExport = Path.Combine(directory, "selective-head.dll");
+				repository.Export(secondCommit.Id, headExport);
+				VerifyFixtureConstants(headExport, 2, 20);
+
+				var firstDelta = repository.CreateCommitDelta(firstCommit.Id);
+				Equal(1, firstDelta.Methods.Count, "First selective delta should contain one method.");
+				Equal("First", firstDelta.Methods[0].Target.MethodName,
+					"First selective delta should contain only First().");
+				var secondDelta = repository.CreateCommitDelta(secondCommit.Id);
+				Equal(1, secondDelta.Methods.Count, "Second selective delta should contain one method.");
+				Equal("Second", secondDelta.Methods[0].Target.MethodName,
+					"Second selective delta should contain only Second().");
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+		static void RepositorySelectiveCommitRejectsStaleSelection() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-selective-stale-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+
+				using var working = ModuleDefMD.Load(workingPath);
+				var method = FindFixtureMethod(working, "First");
+				var current = CreateWorkingConstantChange(method, 2);
+				var stale = new ILPatchMethodChange {
+					Id = current.Id,
+					Target = current.Target,
+					BaseModuleMvid = current.BaseModuleMvid,
+					BaseBody = current.BaseBody,
+					PatchedBody = Snapshot(method, Ldc(3), Op("ret")),
+				};
+				stale.PatchedBody.CanonicalHash = ILPatchBodyHasher.Compute(stale.PatchedBody);
+
+				bool threw = false;
+				try {
+					repository.CommitSelected(working, new[] { current }, new[] { stale }, "stale selection");
+				}
+				catch (InvalidOperationException ex) {
+					threw = ex.Message.Contains("stale", StringComparison.OrdinalIgnoreCase);
+				}
+				True(threw, "Selective commit must reject a staged snapshot that no longer matches the working tree.");
 			}
 			finally {
 				if (Directory.Exists(directory))

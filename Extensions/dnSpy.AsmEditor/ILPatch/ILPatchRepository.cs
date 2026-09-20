@@ -194,12 +194,26 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		public ILPatchRepositoryCommit Commit(ModuleDef currentModule,
-			IReadOnlyList<ILPatchMethodChange> workingChanges, string message) {
+			IReadOnlyList<ILPatchMethodChange> workingChanges, string message) =>
+			CommitSelected(currentModule, workingChanges, workingChanges, message);
+
+		/// <summary>
+		/// Commits only the selected working methods while validating the complete working tree
+		/// against HEAD. Unselected edits may remain in the in-memory module and are deliberately
+		/// excluded from the new commit state.
+		/// </summary>
+		public ILPatchRepositoryCommit CommitSelected(ModuleDef currentModule,
+			IReadOnlyList<ILPatchMethodChange> allWorkingChanges,
+			IReadOnlyList<ILPatchMethodChange> selectedChanges, string message) {
 			ValidateRootIntegrity();
 			if (currentModule is null)
 				throw new ArgumentNullException(nameof(currentModule));
-			if (workingChanges is null)
-				throw new ArgumentNullException(nameof(workingChanges));
+			if (allWorkingChanges is null)
+				throw new ArgumentNullException(nameof(allWorkingChanges));
+			if (selectedChanges is null)
+				throw new ArgumentNullException(nameof(selectedChanges));
+			if (selectedChanges.Count == 0)
+				throw new ArgumentException("At least one working change must be selected for commit.", nameof(selectedChanges));
 			if (string.IsNullOrWhiteSpace(message))
 				throw new ArgumentException("Commit message cannot be empty.", nameof(message));
 
@@ -213,13 +227,27 @@ namespace dnSpy.AsmEditor.ILPatch {
 				: LoadCommitPatch(Metadata.HeadCommitId);
 			var parentState = parentDocument.Methods.ToDictionary(
 				a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
-			var workingState = workingChanges.ToDictionary(
+			var workingState = allWorkingChanges.ToDictionary(
+				a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
+			var selectedState = selectedChanges.ToDictionary(
 				a => a.Target.ToCanonicalString(), a => a, StringComparer.Ordinal);
 
 			ValidateWorkingBase(rootMethods, currentMethods, parentState, workingState);
+			foreach (var pair in selectedState) {
+				if (!workingState.TryGetValue(pair.Key, out var currentWorking))
+					throw new InvalidOperationException(
+						$"Selected change '{pair.Value.Target}' is not present in the current working tree.");
+				if (!StringComparer.Ordinal.Equals(
+					currentWorking.BaseBody.CanonicalHash, pair.Value.BaseBody.CanonicalHash) ||
+					!StringComparer.Ordinal.Equals(
+					currentWorking.PatchedBody.CanonicalHash, pair.Value.PatchedBody.CanonicalHash)) {
+					throw new InvalidOperationException(
+						$"Selected change '{pair.Value.Target}' is stale relative to the current working tree.");
+				}
+			}
 
 			var fullState = new Dictionary<string, ILPatchMethodChange>(parentState, StringComparer.Ordinal);
-			foreach (var pair in workingState) {
+			foreach (var pair in selectedState) {
 				if (!rootMethods.TryGetValue(pair.Key, out var rootMethod))
 					throw new InvalidOperationException($"Working change '{pair.Value.Target}' does not exist in the repository root.");
 
@@ -257,7 +285,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Message = message.Trim(),
 				CreatedUtc = commitTime,
 				PatchFile = patchRelativePath,
-				StateHash = ILPatchModuleStateHasher.Compute(currentModule),
+				StateHash = ComputeDocumentStateHash(document),
 			};
 			PopulateSummary(commit, rootMethods, parentState, fullState);
 
@@ -269,6 +297,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Metadata.HeadCommitId = id;
 			WriteJsonAtomic(Path.Combine(RepositoryPath, MetadataFileName), Metadata);
 			return commit;
+		}
+
+		string ComputeDocumentStateHash(ILPatchDocument document) {
+			using var module = ModuleDefMD.Load(RootModulePath);
+			var report = ILPatchHeadlessApplier.Apply(module, document);
+			if (!report.Success) {
+				string details = string.Join("; ", report.Entries
+					.Where(a => a.Action == ILPatchHeadlessAction.Unresolved)
+					.Select(a => a.Message));
+				throw new InvalidOperationException(
+					"Could not materialize selected repository state from ROOT: " + details);
+			}
+			return ILPatchModuleStateHasher.Compute(module);
 		}
 
 		public bool TryValidateWorkingBase(ModuleDef currentModule,

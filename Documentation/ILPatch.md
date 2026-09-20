@@ -211,14 +211,18 @@ edit methods in dnSpy
    ↓
 review Working Changes / Compare
    ↓
-Commit Working Changes
+stage the methods that belong to one logical feature
    ↓
-working tree becomes clean
+Commit Staged Changes
    ↓
-edit again → next commit
+staged methods become clean; unstaged methods remain
+   ↓
+continue editing / stage next logical commit
 ```
 
 A successful repository commit accepts only that module's current tracked state as the next clean Workspace baseline; other loaded modules are untouched. History shows `HEAD` explicitly. Selecting a commit reconstructs its **parent → commit** semantic delta, and double-clicking a changed method opens the same Normalized IL / Decompiled C# diff viewer used by the working tree. **Export Selected Commit DLL...** materializes any commit (or ROOT) from the immutable repository base and verifies its recorded semantic state hash before writing. Export deliberately refuses to overwrite the currently tracked working DLL; destructive checkout is kept separate from historical export semantics.
+
+Repository commits support **method-level staging**. The Working Changes table has a Stage checkbox plus **Stage All / Unstage All** controls. A commit validates the complete working tree against HEAD but advances HEAD using only staged method changes; unstaged methods remain in the in-memory working tree and can be committed later. The commit state hash is materialized from immutable ROOT plus the newly selected full-state patch, rather than hashing the current in-memory module (which may still contain unstaged edits). After commit, only staged methods are accepted as new Workspace baselines. Their tracking entries remain alive with the committed body as the new baseline, so a later dnSpy Undo/Redo or further edit immediately becomes a new working-tree change relative to HEAD. This is intentionally method-level staging for now; hunk-level staging inside one CIL method is a separate future feature.
 
 Repository mode also distinguishes the in-memory working tree from the DLL currently on disk. The window reports whether the disk file matches HEAD, is still at ROOT/behind HEAD, or differs from both. After committing in-memory edits, use dnSpy's normal **Save Module** before closing if you want the next session to reopen directly on HEAD; repository commits themselves never silently overwrite the working DLL.
 

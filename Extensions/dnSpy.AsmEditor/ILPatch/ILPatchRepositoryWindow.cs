@@ -48,9 +48,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly Button commitButton;
 		readonly TextBox commitMessage;
 		readonly Button exportCommitButton;
+		readonly Button compareWorkingChangeButton;
 		readonly Button compareCommitChangeButton;
+		readonly DataGrid workingChangesGrid;
 		readonly DataGrid historyGrid;
 		readonly DataGrid commitChangesGrid;
+		readonly ObservableCollection<RepositoryWorkingRow> workingRows = new ObservableCollection<RepositoryWorkingRow>();
 		readonly ObservableCollection<RepositoryHistoryRow> historyRows = new ObservableCollection<RepositoryHistoryRow>();
 		readonly ObservableCollection<RepositoryChangeRow> changeRows = new ObservableCollection<RepositoryChangeRow>();
 
@@ -131,16 +134,93 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 			statusPanel.Children.Add(diskStatus);
 
+			var workingHeader = new DockPanel { Margin = new Thickness(0, 8, 0, 4) };
+			var stageButtons = new StackPanel { Orientation = Orientation.Horizontal };
+			compareWorkingChangeButton = new Button {
+				Content = "Compare Working Change...",
+				Padding = new Thickness(7, 2, 7, 2),
+				IsEnabled = false,
+				ToolTip = "Open the selected uncommitted method in the Normalized IL / Decompiled C# diff viewer.",
+			};
+			compareWorkingChangeButton.Click += CompareWorkingChangeButton_Click;
+			stageButtons.Children.Add(compareWorkingChangeButton);
+			var stageAllButton = new Button {
+				Content = "Stage All",
+				Padding = new Thickness(7, 2, 7, 2),
+				Margin = new Thickness(6, 0, 0, 0),
+			};
+			stageAllButton.Click += (sender, e) => SetAllStaged(true);
+			stageButtons.Children.Add(stageAllButton);
+			var unstageAllButton = new Button {
+				Content = "Unstage All",
+				Padding = new Thickness(7, 2, 7, 2),
+				Margin = new Thickness(6, 0, 0, 0),
+			};
+			unstageAllButton.Click += (sender, e) => SetAllStaged(false);
+			stageButtons.Children.Add(unstageAllButton);
+			DockPanel.SetDock(stageButtons, Dock.Right);
+			workingHeader.Children.Add(stageButtons);
+			workingHeader.Children.Add(new TextBlock {
+				Text = "Working Changes",
+				FontWeight = FontWeights.SemiBold,
+				VerticalAlignment = VerticalAlignment.Center,
+			});
+			statusPanel.Children.Add(workingHeader);
+
+			workingChangesGrid = new DataGrid {
+				AutoGenerateColumns = false,
+				CanUserAddRows = false,
+				CanUserDeleteRows = false,
+				IsReadOnly = false,
+				HeadersVisibility = DataGridHeadersVisibility.Column,
+				GridLinesVisibility = DataGridGridLinesVisibility.Horizontal,
+				SelectionMode = DataGridSelectionMode.Extended,
+				SelectionUnit = DataGridSelectionUnit.FullRow,
+				MaxHeight = 190,
+				MinHeight = 90,
+			};
+			workingChangesGrid.Columns.Add(new DataGridCheckBoxColumn {
+				Header = "Stage",
+				Binding = new Binding(nameof(RepositoryWorkingRow.IsStaged)) {
+					Mode = BindingMode.TwoWay,
+					UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged,
+				},
+				Width = new DataGridLength(0.55, DataGridLengthUnitType.Star),
+			});
+			workingChangesGrid.Columns.Add(new DataGridTextColumn {
+				Header = "Method",
+				Binding = new Binding(nameof(RepositoryWorkingRow.Method)),
+				Width = new DataGridLength(3.8, DataGridLengthUnitType.Star),
+				IsReadOnly = true,
+			});
+			workingChangesGrid.Columns.Add(new DataGridTextColumn {
+				Header = "Base",
+				Binding = new Binding(nameof(RepositoryWorkingRow.BaseHash)),
+				Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+				IsReadOnly = true,
+			});
+			workingChangesGrid.Columns.Add(new DataGridTextColumn {
+				Header = "Current",
+				Binding = new Binding(nameof(RepositoryWorkingRow.CurrentHash)),
+				Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+				IsReadOnly = true,
+			});
+			workingChangesGrid.ItemsSource = workingRows;
+			workingChangesGrid.CellEditEnding += WorkingChangesGrid_CellEditEnding;
+			workingChangesGrid.SelectionChanged += WorkingChangesGrid_SelectionChanged;
+			workingChangesGrid.MouseDoubleClick += WorkingChangesGrid_MouseDoubleClick;
+			statusPanel.Children.Add(workingChangesGrid);
+
 			var commitBar = new DockPanel {
 				LastChildFill = true,
 				Margin = new Thickness(0, 7, 0, 0),
 			};
 			commitButton = new Button {
-				Content = "Commit Working Changes",
+				Content = "Commit Staged Changes",
 				Padding = new Thickness(10, 3, 10, 3),
 				Margin = new Thickness(8, 0, 0, 0),
 				IsEnabled = false,
-				ToolTip = "Commit the selected module's current tracked changes, then mark that in-memory state as the new clean working baseline.",
+				ToolTip = "Commit only staged methods. Unstaged methods remain in Working Changes and can be committed later.",
 			};
 			commitButton.Click += CommitButton_Click;
 			DockPanel.SetDock(commitButton, Dock.Right);
@@ -355,6 +435,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		void RefreshWorkingState() {
+			var previousStageState = workingRows.ToDictionary(
+				a => a.Change.Target.ToCanonicalString(), a => a.IsStaged, StringComparer.Ordinal);
+			workingRows.Clear();
 			workingBaseValid = false;
 			workingChangeCount = 0;
 			if (selectedModule is null) {
@@ -365,6 +448,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			var changes = ILPatchWorkspace.Instance.GetEffectiveChanges(selectedModule.Module);
 			workingChangeCount = changes.Count;
+			foreach (var change in changes) {
+				string key = change.Target.ToCanonicalString();
+				workingRows.Add(new RepositoryWorkingRow {
+					Change = change,
+					IsStaged = !previousStageState.TryGetValue(key, out bool wasStaged) || wasStaged,
+					Method = change.Target.ToString(),
+					BaseHash = ShortHash(change.BaseBody.CanonicalHash),
+					CurrentHash = ShortHash(change.PatchedBody.CanonicalHash),
+				});
+			}
 			if (repository is null) {
 				workingStatus.Text = changes.Count == 0
 					? "Working tree: clean (repository not initialized)."
@@ -381,19 +474,63 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 
 			workingBaseValid = true;
-			workingStatus.Text = changes.Count == 0
-				? "Working tree: clean."
-				: $"Working tree: {changes.Count} uncommitted method change(s).";
+			UpdateWorkingSummary();
 			UpdateCommitButton();
+		}
+
+		void WorkingChangesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+			compareWorkingChangeButton.IsEnabled = workingChangesGrid.SelectedItem is RepositoryWorkingRow;
+
+		void WorkingChangesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) {
+			if (workingChangesGrid.SelectedItem is RepositoryWorkingRow)
+				OpenSelectedWorkingDiff();
+		}
+
+		void CompareWorkingChangeButton_Click(object sender, RoutedEventArgs e) =>
+			OpenSelectedWorkingDiff();
+
+		void OpenSelectedWorkingDiff() {
+			if (selectedModule is null ||
+				workingChangesGrid.SelectedItem is not RepositoryWorkingRow row)
+				return;
+			MethodDef? target = FindMethod(selectedModule.Module, row.Change.Target);
+			var window = new ILPatchDiffWindow(row.Change, target, decompilerService) { Owner = this };
+			window.Show();
 		}
 
 		void CommitMessage_TextChanged(object sender, TextChangedEventArgs e) => UpdateCommitButton();
 
-		void UpdateCommitButton() =>
+		void WorkingChangesGrid_CellEditEnding(object? sender, DataGridCellEditEndingEventArgs e) =>
+			Dispatcher.BeginInvoke(new Action(() => {
+				UpdateWorkingSummary();
+				UpdateCommitButton();
+			}));
+
+		void SetAllStaged(bool staged) {
+			foreach (var row in workingRows)
+				row.IsStaged = staged;
+			workingChangesGrid.Items.Refresh();
+			UpdateWorkingSummary();
+			UpdateCommitButton();
+		}
+
+		void UpdateWorkingSummary() {
+			if (!workingBaseValid || repository is null)
+				return;
+			int staged = workingRows.Count(a => a.IsStaged);
+			workingStatus.Text = workingChangeCount == 0
+				? "Working tree: clean."
+				: $"Working tree: {workingChangeCount} uncommitted method change(s), {staged} staged.";
+		}
+
+		void UpdateCommitButton() {
+			int staged = workingRows.Count(a => a.IsStaged);
+			commitButton.Content = $"Commit Staged Changes ({staged})";
 			commitButton.IsEnabled = repository is not null &&
 				workingBaseValid &&
-				workingChangeCount != 0 &&
+				staged != 0 &&
 				!string.IsNullOrWhiteSpace(commitMessage.Text);
+		}
 
 		void CommitButton_Click(object sender, RoutedEventArgs e) {
 			if (repository is null || selectedModule is null)
@@ -403,11 +540,22 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return;
 
 			try {
+				workingChangesGrid.CommitEdit(DataGridEditingUnit.Cell, true);
+				workingChangesGrid.CommitEdit(DataGridEditingUnit.Row, true);
 				var changes = ILPatchWorkspace.Instance.GetEffectiveChanges(selectedModule.Module);
 				if (changes.Count == 0)
 					return;
-				var commit = repository.Commit(selectedModule.Module, changes, message);
-				ILPatchWorkspace.Instance.AcceptModuleAsBaseline(selectedModule.Module);
+				var stagedKeys = new HashSet<string>(
+					workingRows.Where(a => a.IsStaged)
+						.Select(a => a.Change.Target.ToCanonicalString()), StringComparer.Ordinal);
+				var staged = changes
+					.Where(a => stagedKeys.Contains(a.Target.ToCanonicalString()))
+					.ToArray();
+				if (staged.Length == 0)
+					return;
+				var commit = repository.CommitSelected(selectedModule.Module, changes, staged, message);
+				ILPatchWorkspace.Instance.AcceptChangesAsBaseline(
+					selectedModule.Module, staged.Select(a => a.Target));
 				commitMessage.Clear();
 				repositoryStatus.Text =
 					$"Repository: {repository.RepositoryPath}   HEAD: {ShortHash(commit.Id)}";
@@ -608,6 +756,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			public override string ToString() =>
 				$"{Path.GetFileName(Filename)}  —  {Filename}";
+		}
+
+		sealed class RepositoryWorkingRow {
+			public ILPatchMethodChange Change { get; set; } = null!;
+			public bool IsStaged { get; set; }
+			public string Method { get; set; } = string.Empty;
+			public string BaseHash { get; set; } = string.Empty;
+			public string CurrentHash { get; set; } = string.Empty;
 		}
 
 		sealed class RepositoryHistoryRow {
