@@ -123,6 +123,18 @@ jobs:
           dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
             verify-cli-rebased-output "$fixture/rebased-output.dll"
 
+          structural_fixture="$RUNNER_TEMP/ilpatch-cli-structural"
+          mkdir -p "$structural_fixture"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            create-cli-structural-fixture "$structural_fixture"
+          dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
+            apply "$structural_fixture/input.dll" "$structural_fixture/structural.ilpatch" \
+            -o "$structural_fixture/output.dll" --json "$structural_fixture/report.json"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-structural-output "$structural_fixture/output.dll"
+          dotnet run --project Tests/ILPatch.CoreTests/ILPatch.CoreTests.csproj -c Release --no-build -- \
+            verify-cli-report "$structural_fixture/report.json" true 0
+
           set +e
           dotnet run --project Tools/ILPatch.Cli/ILPatch.Cli.csproj -c Release --no-build -- \
             rebase "$fixture/conflict-input.dll" "$fixture/patches/001-change.ilpatch" \

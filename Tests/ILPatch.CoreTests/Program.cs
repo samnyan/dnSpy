@@ -97,6 +97,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 					VerifyCliOutput(args[1]);
 					return 0;
 				}
+				if (args.Length == 2 && StringComparer.Ordinal.Equals(args[0], "create-cli-structural-fixture")) {
+					CreateCliStructuralFixture(args[1]);
+					return 0;
+				}
+				if (args.Length == 2 && StringComparer.Ordinal.Equals(args[0], "verify-cli-structural-output")) {
+					VerifyCliStructuralOutput(args[1]);
+					return 0;
+				}
 				if (args.Length == 4 && StringComparer.Ordinal.Equals(args[0], "verify-cli-report")) {
 					VerifyCliReport(args[1], bool.Parse(args[2]), int.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture));
 					return 0;
@@ -149,6 +157,44 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Console.WriteLine(conflictInputPath);
 			Console.WriteLine(rebaseInputPath);
 			Console.WriteLine(patchPath);
+		}
+
+
+		static void CreateCliStructuralFixture(string directory) {
+			directory = Path.GetFullPath(directory);
+			Directory.CreateDirectory(directory);
+			string inputPath = Path.Combine(directory, "input.dll");
+			string patchPath = Path.Combine(directory, "structural.ilpatch");
+
+			var input = CreateNamedIntMethod("Run", 1);
+			input.Module.Write(inputPath);
+
+			var modified = CreateNamedIntMethod("Run", 1);
+			var type = new TypeDefUser("Tests", "CliAddedType", modified.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			modified.Module.Types.Add(type);
+			type.Fields.Add(new FieldDefUser("Value", new FieldSig(modified.Module.CorLibTypes.Int32), FieldAttributes.Public));
+			AddConstantMethod(type, "GetValue", 33);
+
+			True(ILPatchDocumentCreator.TryCreate(input.Module, modified.Module, "cli-structural",
+				out var document, out var report), string.Join(" ", report.UnsupportedReasons));
+			NotNull(document, "CLI structural fixture patch was not created.");
+			ILPatchSerializer.Save(patchPath, document!);
+			Console.WriteLine(inputPath);
+			Console.WriteLine(patchPath);
+		}
+
+		static void VerifyCliStructuralOutput(string outputPath) {
+			outputPath = Path.GetFullPath(outputPath);
+			using var module = ModuleDefMD.Load(outputPath);
+			var type = module.GetTypes().Single(a => StringComparer.Ordinal.Equals(a.FullName, "Tests.CliAddedType"));
+			Equal("System.Int32", type.Fields.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Value")).FieldType.FullName,
+				"CLI structural output should contain the added field.");
+			var method = type.Methods.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "GetValue"));
+			Equal(33L, CilNormalizer.CreateSnapshot(method).Instructions[0].Operand.IntegerValue,
+				"CLI structural output should contain the added method body.");
+			Console.WriteLine("CLI structural output verified.");
 		}
 
 		static void VerifyCliOutput(string outputPath) {
