@@ -116,8 +116,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly MethodDef? target;
 		readonly IDecompilerService decompilerService;
 		readonly ComboBox modeSelector;
+		readonly CheckBox showAllContext;
+		readonly Button previousChangeButton;
+		readonly Button nextChangeButton;
+		readonly TextBlock statsText;
 		readonly TextBlock statusText;
 		readonly DataGrid diffGrid;
+		IReadOnlyList<DiffDisplayRow> visibleRows = Array.Empty<DiffDisplayRow>();
 
 		public ILPatchDiffWindow(ILPatchMethodChange change, MethodDef? target,
 			IDecompilerService decompilerService) {
@@ -149,8 +154,45 @@ namespace dnSpy.AsmEditor.ILPatch {
 			DockPanel.SetDock(modeSelector, Dock.Left);
 			toolbar.Children.Add(modeSelector);
 
+			showAllContext = new CheckBox {
+				Content = "Show all unchanged",
+				VerticalAlignment = VerticalAlignment.Center,
+				Margin = new Thickness(0, 0, 12, 0),
+			};
+			showAllContext.Checked += ShowAllContext_Changed;
+			showAllContext.Unchecked += ShowAllContext_Changed;
+			DockPanel.SetDock(showAllContext, Dock.Left);
+			toolbar.Children.Add(showAllContext);
+
+			previousChangeButton = new Button {
+				Content = "Previous change",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(0, 0, 6, 0),
+				IsEnabled = false,
+			};
+			previousChangeButton.Click += PreviousChangeButton_Click;
+			DockPanel.SetDock(previousChangeButton, Dock.Left);
+			toolbar.Children.Add(previousChangeButton);
+
+			nextChangeButton = new Button {
+				Content = "Next change",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(0, 0, 12, 0),
+				IsEnabled = false,
+			};
+			nextChangeButton.Click += NextChangeButton_Click;
+			DockPanel.SetDock(nextChangeButton, Dock.Left);
+			toolbar.Children.Add(nextChangeButton);
+
+			statsText = new TextBlock {
+				VerticalAlignment = VerticalAlignment.Center,
+				Margin = new Thickness(0, 0, 12, 0),
+			};
+			DockPanel.SetDock(statsText, Dock.Right);
+			toolbar.Children.Add(statsText);
+
 			var legend = new TextBlock {
-				Text = "  ~ modified    - removed    + added",
+				Text = "~ modified    - removed    + added",
 				VerticalAlignment = VerticalAlignment.Center,
 			};
 			toolbar.Children.Add(legend);
@@ -226,14 +268,97 @@ namespace dnSpy.AsmEditor.ILPatch {
 					$"Normalized IL diff — base {ShortHash(change.BaseBody.CanonicalHash)} -> patched {ShortHash(change.PatchedBody.CanonicalHash)}.";
 			}
 
-			diffGrid.ItemsSource = ILPatchDiffEngine.Compare(left, right)
-				.Select(a => new DiffDisplayRow(a))
-				.ToArray();
+			var rows = ILPatchDiffEngine.Compare(left, right);
+			int added = rows.Count(a => a.Kind == ILPatchDiffKind.Added);
+			int removed = rows.Count(a => a.Kind == ILPatchDiffKind.Removed);
+			int modified = rows.Count(a => a.Kind == ILPatchDiffKind.Modified);
+			int changed = added + removed + modified;
+			statsText.Text = $"{changed} changed row(s)   +{added}  -{removed}  ~{modified}";
+			previousChangeButton.IsEnabled = changed != 0;
+			nextChangeButton.IsEnabled = changed != 0;
+
+			visibleRows = CreateVisibleRows(rows, showAllContext.IsChecked == true, 3);
+			diffGrid.ItemsSource = visibleRows;
+			if (changed != 0)
+				SelectChange(forward: true, fromCurrent: false);
+		}
+
+		void ShowAllContext_Changed(object sender, RoutedEventArgs e) => RefreshDiff();
+
+		void PreviousChangeButton_Click(object sender, RoutedEventArgs e) =>
+			SelectChange(forward: false, fromCurrent: true);
+
+		void NextChangeButton_Click(object sender, RoutedEventArgs e) =>
+			SelectChange(forward: true, fromCurrent: true);
+
+		void SelectChange(bool forward, bool fromCurrent) {
+			if (visibleRows.Count == 0)
+				return;
+
+			int start = forward ? -1 : visibleRows.Count;
+			if (fromCurrent && diffGrid.SelectedItem is DiffDisplayRow selected) {
+				for (int i = 0; i < visibleRows.Count; i++) {
+					if (ReferenceEquals(visibleRows[i], selected)) {
+						start = i;
+						break;
+					}
+				}
+			}
+			for (int offset = 1; offset <= visibleRows.Count; offset++) {
+				int index = forward
+					? (start + offset + visibleRows.Count) % visibleRows.Count
+					: (start - offset + visibleRows.Count) % visibleRows.Count;
+				var row = visibleRows[index];
+				if (row.IsSeparator || row.Kind == ILPatchDiffKind.Same)
+					continue;
+				diffGrid.SelectedItem = row;
+				diffGrid.ScrollIntoView(row);
+				return;
+			}
+		}
+
+		static IReadOnlyList<DiffDisplayRow> CreateVisibleRows(IReadOnlyList<ILPatchDiffRow> rows,
+			bool showAll, int contextLines) {
+			if (showAll || rows.Count == 0)
+				return rows.Select(a => new DiffDisplayRow(a)).ToArray();
+
+			var keep = new bool[rows.Count];
+			bool anyChanged = false;
+			for (int i = 0; i < rows.Count; i++) {
+				if (rows[i].Kind == ILPatchDiffKind.Same)
+					continue;
+				anyChanged = true;
+				int start = Math.Max(0, i - contextLines);
+				int end = Math.Min(rows.Count - 1, i + contextLines);
+				for (int j = start; j <= end; j++)
+					keep[j] = true;
+			}
+			if (!anyChanged)
+				return rows.Select(a => new DiffDisplayRow(a)).ToArray();
+
+			var result = new List<DiffDisplayRow>();
+			int index = 0;
+			while (index < rows.Count) {
+				if (keep[index]) {
+					result.Add(new DiffDisplayRow(rows[index]));
+					index++;
+					continue;
+				}
+				int hiddenStart = index;
+				while (index < rows.Count && !keep[index])
+					index++;
+				result.Add(DiffDisplayRow.Separator(index - hiddenStart));
+			}
+			return result;
 		}
 
 		void DiffGrid_LoadingRow(object sender, DataGridRowEventArgs e) {
 			if (!(e.Row.Item is DiffDisplayRow row))
 				return;
+			if (row.IsSeparator) {
+				e.Row.Background = new SolidColorBrush(Color.FromArgb(28, 128, 128, 128));
+				return;
+			}
 			switch (row.Kind) {
 			case ILPatchDiffKind.Added:
 				e.Row.Background = new SolidColorBrush(Color.FromArgb(34, 40, 180, 80));
@@ -255,11 +380,24 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		sealed class DiffDisplayRow {
 			public ILPatchDiffKind Kind { get; }
+			public bool IsSeparator { get; }
 			public string LeftLine { get; }
 			public string LeftText { get; }
 			public string Marker { get; }
 			public string RightLine { get; }
 			public string RightText { get; }
+
+			DiffDisplayRow(int hiddenCount) {
+				Kind = ILPatchDiffKind.Same;
+				IsSeparator = true;
+				LeftLine = string.Empty;
+				RightLine = string.Empty;
+				Marker = "…";
+				LeftText = $"… {hiddenCount} unchanged line(s) …";
+				RightText = LeftText;
+			}
+
+			public static DiffDisplayRow Separator(int hiddenCount) => new DiffDisplayRow(hiddenCount);
 
 			public DiffDisplayRow(ILPatchDiffRow row) {
 				Kind = row.Kind;

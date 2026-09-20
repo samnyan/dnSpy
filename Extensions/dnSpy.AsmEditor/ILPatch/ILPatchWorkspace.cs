@@ -149,9 +149,20 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Changed?.Invoke(this, EventArgs.Empty);
 		}
 
-		public IReadOnlyList<ILPatchMethodChange> GetEffectiveChanges() {
+		public IReadOnlyList<ILPatchMethodChange> GetEffectiveChanges() =>
+			GetEffectiveChangesCore(null);
+
+		public IReadOnlyList<ILPatchMethodChange> GetEffectiveChanges(ModuleDef module) {
+			if (module is null)
+				throw new ArgumentNullException(nameof(module));
+			return GetEffectiveChangesCore(module);
+		}
+
+		IReadOnlyList<ILPatchMethodChange> GetEffectiveChangesCore(ModuleDef? module) {
 			var result = new List<ILPatchMethodChange>();
 			foreach (var tracked in trackedMethods.Values) {
+				if (module is not null && !ReferenceEquals(tracked.Method.Module, module))
+					continue;
 				if (StringComparer.Ordinal.Equals(tracked.Baseline.CanonicalHash, tracked.Current.CanonicalHash))
 					continue;
 				result.Add(new ILPatchMethodChange {
@@ -195,6 +206,30 @@ namespace dnSpy.AsmEditor.ILPatch {
 			method = match?.Method;
 			baselineOptions = match?.BaselineOptions;
 			return method is not null && baselineOptions is not null;
+		}
+
+		/// <summary>
+		/// Marks one module's current in-memory state as the new clean working baseline after a
+		/// repository commit. Tracking entries are removed so the next edit captures the committed
+		/// state as a fresh baseline. Durable history now lives in .dnspy, so this module's session
+		/// edit rows are cleared as well.
+		/// </summary>
+		public void AcceptModuleAsBaseline(ModuleDef module) {
+			if (module is null)
+				throw new ArgumentNullException(nameof(module));
+
+			bool changed = false;
+			foreach (var method in trackedMethods.Keys
+				.Where(a => ReferenceEquals(a.Module, module))
+				.ToArray()) {
+				trackedMethods.Remove(method);
+				pendingMutations.Remove(method);
+				changed = true;
+			}
+			int removedHistory = history.RemoveAll(a => ReferenceEquals(a.SourceModule, module));
+			changed |= removedHistory != 0;
+			if (changed)
+				Changed?.Invoke(this, EventArgs.Empty);
 		}
 
 		public void RemoveModules(IEnumerable<ModuleDef> modules) {

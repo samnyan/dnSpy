@@ -202,6 +202,24 @@ For history review, stored ROOT-to-commit snapshots are converted on demand into
 
 Repository integrity is verified fail-closed. The immutable ROOT DLL is protected by both its original file SHA-256 and semantic module-state hash. Commit export recomputes the materialized module-state hash and must match the commit metadata before a DLL is written; a modified ROOT or corrupted patch/commit state therefore cannot silently produce a trusted export.
 
+The GUI now exposes this repository through **Change Repository...**. The selected loaded module can be initialized as a repository, committed repeatedly, and reviewed as a normal working-tree/history flow:
+
+```text
+Initialize ROOT
+   ↓
+edit methods in dnSpy
+   ↓
+review Working Changes / Compare
+   ↓
+Commit Working Changes
+   ↓
+working tree becomes clean
+   ↓
+edit again → next commit
+```
+
+A successful repository commit accepts only that module's current tracked state as the next clean Workspace baseline; other loaded modules are untouched. History shows `HEAD` explicitly. Selecting a commit reconstructs its **parent → commit** semantic delta, and double-clicking a changed method opens the same Normalized IL / Decompiled C# diff viewer used by the working tree. **Export Selected Commit DLL...** materializes any commit (or ROOT) from the immutable repository base and verifies its recorded semantic state hash before writing. Export deliberately refuses to overwrite the currently tracked working DLL; destructive checkout is kept separate from historical export semantics.
+
 ### Side-by-side patch diff
 
 Tracked workspace changes and imported patch entries can be opened in a dedicated **Compare** window (or by double-clicking the row). The viewer keeps both sides vertically aligned in one grid and classifies each line as unchanged, added, removed, or modified.
@@ -213,11 +231,14 @@ Two review projections are available:
 
 The C# diff deliberately never becomes the source of truth for apply/rebase decisions; decompiler output can change across decompiler versions even when IL semantics do not.
 
+The viewer is optimized for code-review rather than raw text dumping: unchanged regions are collapsed to three context lines around each change by default, **Show all unchanged** expands the complete method, and **Previous change / Next change** jumps between added/removed/modified rows. A compact summary shows the number of changed, added, removed and modified aligned rows. Because both sides are rendered as one aligned table, scrolling is inherently synchronized between Base and Patched.
+
 ### Recommended GUI workflow
 
 The Patch Workspace is split conceptually into two workflows:
 
 1. **Create a patch from edits** — load the original assembly, edit CIL using dnSpy as usual, review the tracked normalized IL changes in the upper grid, then choose **Export .ilpatch...**. **Revert Selected** restores one tracked method to the captured pre-edit baseline through dnSpy undo/redo.
+   For long-running projects, choose **Change Repository...** instead of repeatedly saving ad-hoc DLL copies: initialize once, commit each completed feature/fix, then review or export any historical commit later.
    If you already have an old original DLL and a separately saved dnSpy-modified DLL, choose **Recover from DLL Pair...** instead. The recovery path compares normalized existing CIL method bodies and writes a regular v1 `.ilpatch`; unsupported structural changes such as added/removed/renamed methods or metadata flag changes abort recovery instead of being silently omitted.
 2. **Replay a patch** — load the target/newer assembly, choose **Import .ilpatch...**, inspect each result and its normalized IL diff, resolve renamed/moved methods with **Use Candidate** only when appropriate, then use **Apply Safe**. If you load/replace/close assemblies after importing, choose **Refresh Preview** to rerun matching against the modules currently loaded in dnSpy without reselecting the patch file; manual target overrides are preserved. Apply Safe combines all current `Exact` and `BaseChanged + Clean` entries into one preflighted dnSpy undo command. Finally, save the modified module using dnSpy's normal save command.
 3. **Move the patch baseline forward** — after resolving a newer assembly, choose **Export Rebased...** to write a new definition for future versions without overwriting the source patch.

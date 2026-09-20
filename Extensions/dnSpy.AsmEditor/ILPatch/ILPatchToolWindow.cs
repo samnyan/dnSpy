@@ -188,6 +188,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 			compareChangeButton.Click += CompareChangeButton_Click;
 			workspaceButtons.Children.Add(compareChangeButton);
 
+			var repositoryButton = new Button {
+				Content = "Change Repository...",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				ToolTip = "Open Git-like .dnspy repository mode: initialize, commit working changes, review history and export any commit as a DLL.",
+			};
+			repositoryButton.Click += RepositoryButton_Click;
+			workspaceButtons.Children.Add(repositoryButton);
+
 			var recoverButton = new Button {
 				Content = "Recover from DLL Pair...",
 				Padding = new Thickness(8, 2, 8, 2),
@@ -530,6 +539,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 			catch (Exception ex) {
 				MsgBox.Instance.Show(ex, "Could not revert the selected IL patch change.");
 			}
+		}
+
+		void RepositoryButton_Click(object sender, RoutedEventArgs e) {
+			var window = new ILPatchRepositoryWindow(documentService, decompilerService) {
+				Owner = Window.GetWindow(this),
+			};
+			window.Show();
 		}
 
 		void RecoverPatchFromDllPairButton_Click(object sender, RoutedEventArgs e) {
