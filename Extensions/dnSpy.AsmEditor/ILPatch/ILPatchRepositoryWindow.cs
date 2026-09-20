@@ -833,36 +833,68 @@ namespace dnSpy.AsmEditor.ILPatch {
 						"Nothing to restore", MessageBoxButton.OK, MessageBoxImage.Information);
 					return;
 				}
-				if (restore.TypeChanges.Count != 0) {
-					throw new NotSupportedException(
-						$"Restoring this state requires {restore.TypeChanges.Count} type/member structural change-set(s). " +
-						"The repository can store/export/replay these changes headlessly, but dnSpy tree-aware undo for structural restore " +
-						"is not wired into this dialog yet. Export the target commit DLL instead of silently dropping structural changes.");
+				ILPatchStructuralMaterializer.Plan? structuralPlan = null;
+				var addedBodies = new Dictionary<MethodDef, CilBody>();
+				if (restore.TypeChanges.Any(a => a.HasEffectiveChange)) {
+					if (!ILPatchStructuralMaterializer.TryPrepare(selectedModule.Module, restore.TypeChanges,
+						out structuralPlan, out string structuralError) || structuralPlan is null) {
+						throw new InvalidOperationException(
+							"Could not prepare repository structural restore: " + structuralError);
+					}
+					structuralPlan.AttachAdditions();
 				}
 
 				var materializer = new ILPatchBodyMaterializer(selectedModule.Module);
 				var entries = new List<ApplyILPatchCommand.Entry>(restore.Methods.Count);
-				foreach (var change in restore.Methods) {
-					var target = FindMethod(selectedModule.Module, change.Target) ??
-						throw new InvalidOperationException($"Could not resolve current method '{change.Target}'.");
-					var methodNode = appService.DocumentTreeView.FindNode(target) as MethodNode ??
-						throw new InvalidOperationException($"Could not find the dnSpy tree node for '{change.Target}'.");
-					if (!materializer.TryCreate(target, change.PatchedBody, out var newBody, out string error) ||
-						newBody is null) {
-						throw new InvalidOperationException(
-							$"Could not materialize repository state for '{change.Target}': {error}");
+				try {
+					foreach (var change in restore.Methods) {
+						var target = FindMethod(selectedModule.Module, change.Target) ??
+							throw new InvalidOperationException($"Could not resolve current method '{change.Target}'.");
+						var methodNode = appService.DocumentTreeView.FindNode(target) as MethodNode ??
+							throw new InvalidOperationException($"Could not find the dnSpy tree node for '{change.Target}'.");
+						if (!materializer.TryCreate(target, change.PatchedBody, out var newBody, out string error) ||
+							newBody is null) {
+							throw new InvalidOperationException(
+								$"Could not materialize repository state for '{change.Target}': {error}");
+						}
+						entries.Add(new ApplyILPatchCommand.Entry(methodNode, newBody));
 					}
-					entries.Add(new ApplyILPatchCommand.Entry(methodNode, newBody));
+
+					if (structuralPlan is not null) {
+						foreach (var added in structuralPlan.AddedMethods) {
+							if (added.Body is null)
+								continue;
+							if (!materializer.TryCreate(added.Method, added.Body, out var newBody, out string error) ||
+								newBody is null) {
+								throw new InvalidOperationException(
+									$"Could not materialize added method '{added.Method.Name}': {error}");
+							}
+							addedBodies.Add(added.Method, newBody);
+						}
+					}
+				}
+				finally {
+					structuralPlan?.RollbackAdditions();
 				}
 
-				undoCommandService.Add(new ApplyILPatchCommand(
-					methodAnnotations, entries, "Restore repository state " + targetName));
+				if (structuralPlan is null) {
+					undoCommandService.Add(new ApplyILPatchCommand(
+						methodAnnotations, entries, "Restore repository state " + targetName));
+				}
+				else {
+					undoCommandService.Add(new ApplyILPatchDocumentCommand(
+						methodAnnotations,
+						appService.DocumentTreeView,
+						entries,
+						new[] { (structuralPlan, (IReadOnlyDictionary<MethodDef, CilBody>)addedBodies) },
+						"Restore repository state " + targetName));
+				}
 				RefreshWorkingState();
 				SetAllStaged(false);
 				RefreshDiskStatus();
 
 				MessageBox.Show(this,
-					$"Restored {entries.Count} method(s) to {targetName} in memory.\n\n" +
+					$"Restored {entries.Count} existing method body change(s) and {restore.TypeChanges.Count(a => a.HasEffectiveChange)} structural type set(s) to {targetName} in memory.\n\n" +
 					"HEAD is unchanged. Review/stage the resulting Working Changes, then commit if you want " +
 					"this historical state to become a new commit. Save Module explicitly if you want it on disk.",
 					"Working tree restored", MessageBoxButton.OK, MessageBoxImage.Information);
