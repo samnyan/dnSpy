@@ -41,6 +41,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(DocumentCreatorIgnoresMaxStackNoise), DocumentCreatorIgnoresMaxStackNoise),
 				(nameof(DocumentCreatorCapturesAddedMethod), DocumentCreatorCapturesAddedMethod),
 				(nameof(DocumentCreatorCapturesAddedAndRemovedField), DocumentCreatorCapturesAddedAndRemovedField),
+				(nameof(HeadlessApplyReplaysAddedMethod), HeadlessApplyReplaysAddedMethod),
+				(nameof(HeadlessApplyReplaysFieldTopology), HeadlessApplyReplaysFieldTopology),
 				(nameof(SerializerReadsLegacyV1Document), SerializerReadsLegacyV1Document),
 				(nameof(DocumentCreatorRejectsMethodFlagChange), DocumentCreatorRejectsMethodFlagChange),
 				(nameof(DocumentCreatorDiskRoundTripCapturesBodyChange), DocumentCreatorDiskRoundTripCapturesBodyChange),
@@ -846,6 +848,45 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Equal(1, document.TypeChanges[0].AddedFields.Count, "New field should be recorded.");
 			Equal(1, document.TypeChanges[0].RemovedFields.Count, "Removed field should be recorded.");
 			Equal(2, report.StructuralChangedCount, "Add + remove field should count as two structural changes.");
+		}
+
+		static void HeadlessApplyReplaysAddedMethod() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var modified = CreateNamedIntMethod("Run", 1);
+			var added = new MethodDefUser("Added", MethodSig.CreateStatic(modified.Module.CorLibTypes.Int32)) {
+				Body = new dnlib.DotNet.Emit.CilBody(),
+			};
+			added.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.CreateLdcI4(7));
+			added.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
+			modified.DeclaringType!.Methods.Add(added);
+
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "add-method",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Added-method patch should be created.");
+			var applyReport = ILPatchHeadlessApplier.Apply(original.Module, document!);
+			True(applyReport.Success, applyReport.StructuralMessage);
+			var replayed = original.DeclaringType!.Methods.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Added"));
+			Equal(7L, CilNormalizer.CreateSnapshot(replayed).Instructions[0].Operand.IntegerValue,
+				"Added method body should survive structural replay.");
+		}
+
+		static void HeadlessApplyReplaysFieldTopology() {
+			var original = CreateNamedIntMethod("Run", 1);
+			original.DeclaringType!.Fields.Add(new FieldDefUser("OldValue",
+				new FieldSig(original.Module.CorLibTypes.Int32), FieldAttributes.Public));
+			var modified = CreateNamedIntMethod("Run", 1);
+			modified.DeclaringType!.Fields.Add(new FieldDefUser("NewValue",
+				new FieldSig(modified.Module.CorLibTypes.String), FieldAttributes.Private));
+
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "field-topology",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Field topology patch should be created.");
+			var applyReport = ILPatchHeadlessApplier.Apply(original.Module, document!);
+			True(applyReport.Success, applyReport.StructuralMessage);
+			False(original.DeclaringType!.Fields.Any(a => StringComparer.Ordinal.Equals(a.Name?.String, "OldValue")),
+				"Removed field must disappear after replay.");
+			var added = original.DeclaringType.Fields.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "NewValue"));
+			Equal("System.String", added.FieldType.FullName, "Added field type should be reconstructed.");
 		}
 
 		static void SerializerReadsLegacyV1Document() {

@@ -50,13 +50,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public bool Success { get; }
 		public int AppliedCount { get; }
 		public int AlreadyPresentCount { get; }
+		public string StructuralMessage { get; }
 
 		public ILPatchHeadlessApplyReport(IReadOnlyList<ILPatchHeadlessEntryResult> entries,
-			bool success, int appliedCount, int alreadyPresentCount) {
+			bool success, int appliedCount, int alreadyPresentCount, string structuralMessage = "") {
 			Entries = entries ?? throw new ArgumentNullException(nameof(entries));
 			Success = success;
 			AppliedCount = appliedCount;
 			AlreadyPresentCount = alreadyPresentCount;
+			StructuralMessage = structuralMessage ?? string.Empty;
 		}
 	}
 
@@ -80,17 +82,21 @@ namespace dnSpy.AsmEditor.ILPatch {
 				throw new ArgumentNullException(nameof(module));
 			if (document is null)
 				throw new ArgumentNullException(nameof(document));
-			if (document.TypeChanges.Count != 0)
-				throw new NotSupportedException(
-					"ILPatch v2 structural member changes are present, but this apply path has not materialized them yet. Nothing was modified.");
+			if (!ILPatchStructuralMaterializer.TryPrepare(module, document.TypeChanges, out var structuralPlan, out string structuralError) ||
+				structuralPlan is null) {
+				return new ILPatchHeadlessApplyReport(Array.Empty<ILPatchHeadlessEntryResult>(), false, 0, 0,
+					structuralError);
+			}
 
-			var preview = ILPatchImportMatcher.CreatePreview(document, new[] { module });
-			var materializer = new ILPatchBodyMaterializer(module);
-			var planned = new List<PlannedBody>();
-			var seenTargets = new HashSet<MethodDef>();
-			var entries = new List<ILPatchHeadlessEntryResult>(preview.Results.Count);
-			int alreadyPresent = 0;
-			bool unresolved = false;
+			structuralPlan.AttachAdditions();
+			try {
+				var preview = ILPatchImportMatcher.CreatePreview(document, new[] { module });
+				var materializer = new ILPatchBodyMaterializer(module);
+				var planned = new List<PlannedBody>();
+				var seenTargets = new HashSet<MethodDef>();
+				var entries = new List<ILPatchHeadlessEntryResult>(preview.Results.Count);
+				int alreadyPresent = 0;
+				bool unresolved = false;
 
 			foreach (var result in preview.Results) {
 				switch (result.Status) {
@@ -155,13 +161,41 @@ namespace dnSpy.AsmEditor.ILPatch {
 				}
 			}
 
-			if (unresolved)
-				return new ILPatchHeadlessApplyReport(entries, false, 0, alreadyPresent);
+				foreach (var added in structuralPlan.AddedMethods) {
+					if (added.Body is null)
+						continue;
+					if (!materializer.TryCreate(added.Method, added.Body, out var body, out string bodyError) || body is null) {
+						entries.Add(new ILPatchHeadlessEntryResult(
+							new ILPatchMethodChange {
+								Target = ILPatchMethodIdentity.Create(added.Method),
+								BaseBody = added.Body,
+								PatchedBody = added.Body,
+							},
+							added.Method, ILPatchHeadlessAction.Unresolved,
+							"Added method body could not be materialized: " + bodyError));
+						unresolved = true;
+						continue;
+					}
+					planned.Add(new PlannedBody(added.Method, body));
+				}
 
-			foreach (var entry in planned)
-				entry.Target.MethodBody = entry.Body;
+				if (unresolved) {
+					structuralPlan.RollbackAdditions();
+					return new ILPatchHeadlessApplyReport(entries, false, 0, alreadyPresent,
+						"At least one method or structural entry could not be materialized.");
+				}
 
-			return new ILPatchHeadlessApplyReport(entries, true, planned.Count, alreadyPresent);
+				foreach (var entry in planned)
+					entry.Target.MethodBody = entry.Body;
+				structuralPlan.CommitRemovals();
+
+				return new ILPatchHeadlessApplyReport(entries, true,
+					planned.Count + structuralPlan.OperationCount, alreadyPresent, string.Empty);
+			}
+			catch {
+				structuralPlan.RollbackAdditions();
+				throw;
+			}
 		}
 
 		static bool TryPlanBody(ILPatchImportResult result, ILPatchMethodBodySnapshot snapshot,
