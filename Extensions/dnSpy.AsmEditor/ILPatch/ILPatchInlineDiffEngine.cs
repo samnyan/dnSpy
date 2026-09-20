@@ -141,12 +141,40 @@ namespace dnSpy.AsmEditor.ILPatch {
 					while (index < text.Length && char.IsWhiteSpace(text[index]))
 						index++;
 				}
+				else if (IsOperatorChar(ch)) {
+					index++;
+					while (index < text.Length && IsOperatorChar(text[index]))
+						index++;
+				}
 				else {
 					index++;
 				}
 				result.Add(text.Substring(start, index - start));
 			}
 			return result;
+		}
+
+		static bool IsOperatorChar(char ch) {
+			switch (ch) {
+			case '!':
+			case '%':
+			case '&':
+			case '*':
+			case '+':
+			case '-':
+			case '/':
+			case ':':
+			case '<':
+			case '=':
+			case '>':
+			case '?':
+			case '^':
+			case '|':
+			case '~':
+				return true;
+			default:
+				return false;
+			}
 		}
 	}
 }
