@@ -43,6 +43,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(DocumentCreatorCapturesAddedAndRemovedField), DocumentCreatorCapturesAddedAndRemovedField),
 				(nameof(HeadlessApplyReplaysAddedMethod), HeadlessApplyReplaysAddedMethod),
 				(nameof(HeadlessApplyReplaysFieldTopology), HeadlessApplyReplaysFieldTopology),
+				(nameof(HeadlessApplyReplaysPropertyWithAccessor), HeadlessApplyReplaysPropertyWithAccessor),
+				(nameof(HeadlessApplyReplaysEventWithAccessors), HeadlessApplyReplaysEventWithAccessors),
 				(nameof(SerializerReadsLegacyV1Document), SerializerReadsLegacyV1Document),
 				(nameof(DocumentCreatorRejectsMethodFlagChange), DocumentCreatorRejectsMethodFlagChange),
 				(nameof(DocumentCreatorDiskRoundTripCapturesBodyChange), DocumentCreatorDiskRoundTripCapturesBodyChange),
@@ -888,6 +890,87 @@ namespace dnSpy.AsmEditor.ILPatch {
 				"Removed field must disappear after replay.");
 			var added = original.DeclaringType.Fields.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "NewValue"));
 			Equal("System.String", added.FieldType.FullName, "Added field type should be reconstructed.");
+		}
+
+
+		static void HeadlessApplyReplaysPropertyWithAccessor() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var modified = CreateNamedIntMethod("Run", 1);
+			var type = modified.DeclaringType!;
+			var getter = new MethodDefUser("get_Value",
+				MethodSig.CreateStatic(modified.Module.CorLibTypes.Int32),
+				MethodImplAttributes.IL | MethodImplAttributes.Managed,
+				MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.HideBySig) {
+				Body = new dnlib.DotNet.Emit.CilBody(),
+			};
+			getter.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.CreateLdcI4(42));
+			getter.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
+			type.Methods.Add(getter);
+			var property = new PropertyDefUser("Value",
+				PropertySig.CreateStatic(modified.Module.CorLibTypes.Int32), PropertyAttributes.None);
+			property.GetMethods.Add(getter);
+			type.Properties.Add(property);
+
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "property",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Property patch should be created.");
+			Equal(1, document!.TypeChanges.Count, "Property topology should be grouped under its declaring type.");
+			Equal(1, document.TypeChanges[0].AddedProperties.Count, "Added property metadata should be captured.");
+			Equal(1, document.TypeChanges[0].AddedMethods.Count, "Property getter method should be captured.");
+
+			var applyReport = ILPatchHeadlessApplier.Apply(original.Module, document);
+			True(applyReport.Success, applyReport.StructuralMessage);
+			var replayedType = original.DeclaringType!;
+			var replayedProperty = replayedType.Properties.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Value"));
+			var replayedGetter = replayedType.Methods.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "get_Value"));
+			True(ReferenceEquals(replayedProperty.GetMethod, replayedGetter),
+				"Replayed property getter must reference the exact replayed MethodDef.");
+			Equal(42L, CilNormalizer.CreateSnapshot(replayedGetter).Instructions[0].Operand.IntegerValue,
+				"Replayed property getter body should be preserved.");
+		}
+
+		static void HeadlessApplyReplaysEventWithAccessors() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var modified = CreateNamedIntMethod("Run", 1);
+			var type = modified.DeclaringType!;
+
+			MethodDefUser CreateAccessor(string name) {
+				var method = new MethodDefUser(name,
+					MethodSig.CreateStatic(modified.Module.CorLibTypes.Void),
+					MethodImplAttributes.IL | MethodImplAttributes.Managed,
+					MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.HideBySig) {
+					Body = new dnlib.DotNet.Emit.CilBody(),
+				};
+				method.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
+				type.Methods.Add(method);
+				return method;
+			}
+
+			var add = CreateAccessor("add_Changed");
+			var remove = CreateAccessor("remove_Changed");
+			var @event = new EventDefUser("Changed", modified.Module.CorLibTypes.Object.TypeDefOrRef, EventAttributes.None) {
+				AddMethod = add,
+				RemoveMethod = remove,
+			};
+			type.Events.Add(@event);
+
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "event",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Event patch should be created.");
+			Equal(1, document!.TypeChanges.Count, "Event topology should be grouped under its declaring type.");
+			Equal(1, document.TypeChanges[0].AddedEvents.Count, "Added event metadata should be captured.");
+			Equal(2, document.TypeChanges[0].AddedMethods.Count, "Event accessor methods should be captured.");
+
+			var applyReport = ILPatchHeadlessApplier.Apply(original.Module, document);
+			True(applyReport.Success, applyReport.StructuralMessage);
+			var replayedType = original.DeclaringType!;
+			var replayedEvent = replayedType.Events.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Changed"));
+			var replayedAdd = replayedType.Methods.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "add_Changed"));
+			var replayedRemove = replayedType.Methods.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "remove_Changed"));
+			True(ReferenceEquals(replayedEvent.AddMethod, replayedAdd),
+				"Replayed event add accessor must reference the exact replayed MethodDef.");
+			True(ReferenceEquals(replayedEvent.RemoveMethod, replayedRemove),
+				"Replayed event remove accessor must reference the exact replayed MethodDef.");
 		}
 
 		static void SerializerReadsLegacyV1Document() {
