@@ -359,6 +359,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			bool Wrap(ILPatchTypeSigSnapshot snapshot, Func<TypeSig, TypeSig> creator,
 				out TypeSig? type, out string error) {
 				type = null;
+				error = string.Empty;
 				if (snapshot.ElementType is null || !TryCreate(snapshot.ElementType, out var child, out error))
 					return false;
 				type = creator(child!);
