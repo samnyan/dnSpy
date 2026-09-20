@@ -45,6 +45,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(HeadlessApplyReplaysFieldTopology), HeadlessApplyReplaysFieldTopology),
 				(nameof(HeadlessApplyReplaysPropertyWithAccessor), HeadlessApplyReplaysPropertyWithAccessor),
 				(nameof(HeadlessApplyReplaysEventWithAccessors), HeadlessApplyReplaysEventWithAccessors),
+				(nameof(HeadlessApplyReplaysAddedType), HeadlessApplyReplaysAddedType),
+				(nameof(HeadlessApplyReplaysRemovedType), HeadlessApplyReplaysRemovedType),
 				(nameof(SerializerReadsLegacyV1Document), SerializerReadsLegacyV1Document),
 				(nameof(DocumentCreatorRejectsMethodFlagChange), DocumentCreatorRejectsMethodFlagChange),
 				(nameof(DocumentCreatorDiskRoundTripCapturesBodyChange), DocumentCreatorDiskRoundTripCapturesBodyChange),
@@ -971,6 +973,59 @@ namespace dnSpy.AsmEditor.ILPatch {
 				"Replayed event add accessor must reference the exact replayed MethodDef.");
 			True(ReferenceEquals(replayedEvent.RemoveMethod, replayedRemove),
 				"Replayed event remove accessor must reference the exact replayed MethodDef.");
+		}
+
+
+		static void HeadlessApplyReplaysAddedType() {
+			var originalMethod = CreateNamedIntMethod("Run", 1);
+			var modifiedMethod = CreateNamedIntMethod("Run", 1);
+			var module = modifiedMethod.Module;
+			var addedType = new TypeDefUser("Tests", "AddedType", module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			module.Types.Add(addedType);
+			addedType.Fields.Add(new FieldDefUser("Value", new FieldSig(module.CorLibTypes.Int32), FieldAttributes.Public));
+			AddConstantMethod(addedType, "GetValue", 17);
+
+			True(ILPatchDocumentCreator.TryCreate(originalMethod.Module, module, "add-type",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Added-type patch should be created.");
+			var typeChange = document!.TypeChanges.Single(a => a.Kind == ILPatchTypeChangeKind.Add);
+			NotNull(typeChange.TypeDefinition, "Added type must carry a complete type definition.");
+			Equal("Tests.AddedType", typeChange.Target.FullName, "Added type identity should be preserved.");
+
+			var applyReport = ILPatchHeadlessApplier.Apply(originalMethod.Module, document);
+			True(applyReport.Success, applyReport.StructuralMessage);
+			var replayed = originalMethod.Module.GetTypes()
+				.Single(a => StringComparer.Ordinal.Equals(a.FullName, "Tests.AddedType"));
+			Equal("System.Object", replayed.BaseType?.FullName ?? string.Empty, "Added type base type should be restored.");
+			Equal("System.Int32", replayed.Fields.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Value")).FieldType.FullName,
+				"Added type field should be restored.");
+			var method = replayed.Methods.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "GetValue"));
+			Equal(17L, CilNormalizer.CreateSnapshot(method).Instructions[0].Operand.IntegerValue,
+				"Added type method body should be restored.");
+		}
+
+		static void HeadlessApplyReplaysRemovedType() {
+			var originalMethod = CreateNamedIntMethod("Run", 1);
+			var modifiedMethod = CreateNamedIntMethod("Run", 1);
+			var module = originalMethod.Module;
+			var removedType = new TypeDefUser("Tests", "RemovedType", module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			module.Types.Add(removedType);
+			AddConstantMethod(removedType, "OldValue", 9);
+
+			True(ILPatchDocumentCreator.TryCreate(module, modifiedMethod.Module, "remove-type",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Removed-type patch should be created.");
+			Equal(1, document!.TypeChanges.Count(a => a.Kind == ILPatchTypeChangeKind.Remove),
+				"One type removal should be encoded.");
+
+			var applyReport = ILPatchHeadlessApplier.Apply(module, document);
+			True(applyReport.Success, applyReport.StructuralMessage);
+			False(module.GetTypes().Any(a => StringComparer.Ordinal.Equals(a.FullName, "Tests.RemovedType")),
+				"Removed type should disappear after replay.");
 		}
 
 		static void SerializerReadsLegacyV1Document() {
