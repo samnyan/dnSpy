@@ -166,6 +166,25 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public ILPatchMethodBodySnapshot? Body { get; set; }
 	}
 
+	enum ILPatchTypeChangeKind {
+		Modify,
+		Add,
+		Remove,
+	}
+
+	sealed class ILPatchTypeDefinitionSnapshot {
+		public ILPatchTypeIdentity Identity { get; set; } = null!;
+		public string Namespace { get; set; } = string.Empty;
+		public string Name { get; set; } = string.Empty;
+		public uint Attributes { get; set; }
+		public ILPatchTypeSigSnapshot? BaseType { get; set; }
+		public ILPatchTypeIdentity? DeclaringType { get; set; }
+		public List<ILPatchFieldDefinitionSnapshot> Fields { get; } = new List<ILPatchFieldDefinitionSnapshot>();
+		public List<ILPatchMethodDefinitionSnapshot> Methods { get; } = new List<ILPatchMethodDefinitionSnapshot>();
+		public List<ILPatchPropertyDefinitionSnapshot> Properties { get; } = new List<ILPatchPropertyDefinitionSnapshot>();
+		public List<ILPatchEventDefinitionSnapshot> Events { get; } = new List<ILPatchEventDefinitionSnapshot>();
+	}
+
 	sealed class ILPatchPropertyDefinitionSnapshot {
 		public ILPatchPropertyIdentity Identity { get; set; } = null!;
 		public ushort Attributes { get; set; }
@@ -192,6 +211,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 	sealed class ILPatchTypeChange {
 		public string Id { get; set; } = Guid.NewGuid().ToString("N");
 		public ILPatchTypeIdentity Target { get; set; } = null!;
+		public ILPatchTypeChangeKind Kind { get; set; } = ILPatchTypeChangeKind.Modify;
+		public ILPatchTypeDefinitionSnapshot? TypeDefinition { get; set; }
 		public List<ILPatchFieldDefinitionSnapshot> AddedFields { get; } = new List<ILPatchFieldDefinitionSnapshot>();
 		public List<ILPatchFieldIdentity> RemovedFields { get; } = new List<ILPatchFieldIdentity>();
 		public List<ILPatchMethodDefinitionSnapshot> AddedMethods { get; } = new List<ILPatchMethodDefinitionSnapshot>();
@@ -202,6 +223,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public List<ILPatchEventIdentity> RemovedEvents { get; } = new List<ILPatchEventIdentity>();
 
 		public bool HasEffectiveChange =>
+			Kind != ILPatchTypeChangeKind.Modify ||
 			AddedFields.Count != 0 || RemovedFields.Count != 0 ||
 			AddedMethods.Count != 0 || RemovedMethods.Count != 0 ||
 			AddedProperties.Count != 0 || RemovedProperties.Count != 0 ||
@@ -209,6 +231,72 @@ namespace dnSpy.AsmEditor.ILPatch {
 	}
 
 	static class ILPatchStructuralSnapshotBuilder {
+
+		public static bool TryCreateType(TypeDef type, out ILPatchTypeDefinitionSnapshot? snapshot, out string error) {
+			snapshot = null;
+			error = string.Empty;
+			if (type is null) {
+				error = "Type is missing.";
+				return false;
+			}
+			if (type.IsGlobalModuleType) {
+				error = "The global <Module> type cannot be structurally added or removed.";
+				return false;
+			}
+			if (type.HasCustomAttributes || type.GenericParameters.Count != 0 ||
+				type.Interfaces.Count != 0 || type.ClassLayout is not null ||
+				type.DeclSecurities.Count != 0) {
+				error = $"Type '{type.FullName}' uses custom attributes, generic parameters, interfaces, explicit layout or declarative security that structural patch v2 does not capture yet.";
+				return false;
+			}
+
+			ILPatchTypeSigSnapshot? baseType = null;
+			if (type.BaseType is not null) {
+				TypeSig source;
+				if (type.BaseType is TypeSpec typeSpec)
+					source = typeSpec.TypeSig;
+				else if (type.BaseType.ResolveTypeDef()?.IsValueType == true)
+					source = new ValueTypeSig(type.BaseType);
+				else
+					source = new ClassSig(type.BaseType);
+				if (!TryCreateTypeSig(source, out baseType, out error))
+					return false;
+			}
+
+			var result = new ILPatchTypeDefinitionSnapshot {
+				Identity = ILPatchTypeIdentity.Create(type),
+				Namespace = type.Namespace?.String ?? string.Empty,
+				Name = type.Name?.String ?? string.Empty,
+				Attributes = (uint)type.Attributes,
+				BaseType = baseType,
+				DeclaringType = type.DeclaringType is null ? null : ILPatchTypeIdentity.Create(type.DeclaringType),
+			};
+
+			foreach (var field in type.Fields) {
+				if (!TryCreateField(field, out var fieldSnapshot, out error) || fieldSnapshot is null)
+					return false;
+				result.Fields.Add(fieldSnapshot);
+			}
+			foreach (var method in type.Methods) {
+				if (!TryCreateMethod(method, out var methodSnapshot, out error) || methodSnapshot is null)
+					return false;
+				result.Methods.Add(methodSnapshot);
+			}
+			foreach (var property in type.Properties) {
+				if (!TryCreateProperty(property, out var propertySnapshot, out error) || propertySnapshot is null)
+					return false;
+				result.Properties.Add(propertySnapshot);
+			}
+			foreach (var @event in type.Events) {
+				if (!TryCreateEvent(@event, out var eventSnapshot, out error) || eventSnapshot is null)
+					return false;
+				result.Events.Add(eventSnapshot);
+			}
+
+			snapshot = result;
+			return true;
+		}
+
 		public static bool TryCreateField(FieldDef field, out ILPatchFieldDefinitionSnapshot? snapshot, out string error) {
 			snapshot = null;
 			error = string.Empty;
