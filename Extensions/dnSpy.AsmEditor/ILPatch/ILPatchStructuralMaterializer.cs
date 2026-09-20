@@ -265,6 +265,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 							error = $"Removed type '{change.Target}' is missing its type definition snapshot.";
 							return false;
 						}
+						if (!ILPatchStructuralSnapshotBuilder.TryCreateType(type!, out var currentDefinition, out string snapshotError) ||
+							currentDefinition is null) {
+							error = $"Could not validate type removal baseline for '{change.Target}': {snapshotError}";
+							return false;
+						}
+						if (!ILPatchStructuralSnapshotComparer.AreEquivalent(change.TypeDefinition, currentDefinition, out string mismatchReason)) {
+							error = $"Type to remove '{change.Target}' changed since the patch baseline. {mismatchReason}";
+							return false;
+						}
 						TypeDef? parent = type!.DeclaringType;
 						int index = parent is null ? module.Types.IndexOf(type) : parent.NestedTypes.IndexOf(type);
 						if (index < 0) {

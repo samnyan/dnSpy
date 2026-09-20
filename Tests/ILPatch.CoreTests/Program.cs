@@ -51,6 +51,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(HeadlessApplyReplaysNestedType), HeadlessApplyReplaysNestedType),
 				(nameof(HeadlessStructuralConflictRollsBackAdditions), HeadlessStructuralConflictRollsBackAdditions),
 				(nameof(HeadlessWholeTypeAddRejectsExistingType), HeadlessWholeTypeAddRejectsExistingType),
+				(nameof(HeadlessWholeTypeRemoveRejectsChangedType), HeadlessWholeTypeRemoveRejectsChangedType),
 				(nameof(SerializerReadsLegacyV1Document), SerializerReadsLegacyV1Document),
 				(nameof(DocumentCreatorRejectsMethodFlagChange), DocumentCreatorRejectsMethodFlagChange),
 				(nameof(DocumentCreatorDiskRoundTripCapturesBodyChange), DocumentCreatorDiskRoundTripCapturesBodyChange),
@@ -1203,6 +1204,35 @@ namespace dnSpy.AsmEditor.ILPatch {
 				"Rejected whole-type add must not create a duplicate TypeDef.");
 			True(report.StructuralMessage.Contains("already exists", StringComparison.Ordinal),
 				"Failure should explain the duplicate type.");
+		}
+
+
+		static void HeadlessWholeTypeRemoveRejectsChangedType() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var removed = new TypeDefUser("Tests", "RemoveGuard", original.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			original.Module.Types.Add(removed);
+			AddConstantMethod(removed, "Value", 9);
+
+			var modified = CreateNamedIntMethod("Run", 1);
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "remove-guard",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Whole-type removal patch should be created.");
+
+			var current = CreateNamedIntMethod("Run", 1);
+			var changed = new TypeDefUser("Tests", "RemoveGuard", current.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			current.Module.Types.Add(changed);
+			AddConstantMethod(changed, "Value", 10);
+
+			var report = ILPatchHeadlessApplier.Apply(current.Module, document!);
+			False(report.Success, "Whole-type removal must fail if the target type changed upstream.");
+			True(current.Module.GetTypes().Any(a => StringComparer.Ordinal.Equals(a.FullName, "Tests.RemoveGuard")),
+				"Rejected whole-type removal must leave the target type attached.");
+			True(report.StructuralMessage.Contains("changed since the patch baseline", StringComparison.Ordinal),
+				"Removal conflict should explain the structural baseline mismatch.");
 		}
 
 		static void SerializerReadsLegacyV1Document() {

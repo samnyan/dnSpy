@@ -230,6 +230,82 @@ namespace dnSpy.AsmEditor.ILPatch {
 			AddedEvents.Count != 0 || RemovedEvents.Count != 0;
 	}
 
+
+	static class ILPatchStructuralSnapshotComparer {
+		public static bool AreEquivalent(ILPatchTypeDefinitionSnapshot expected,
+			ILPatchTypeDefinitionSnapshot current, out string reason) {
+			if (expected is null)
+				throw new ArgumentNullException(nameof(expected));
+			if (current is null)
+				throw new ArgumentNullException(nameof(current));
+			string expectedFingerprint = TypeFingerprint(expected);
+			string currentFingerprint = TypeFingerprint(current);
+			if (StringComparer.Ordinal.Equals(expectedFingerprint, currentFingerprint)) {
+				reason = string.Empty;
+				return true;
+			}
+			reason = "The target type no longer matches the structural baseline captured by this patch.";
+			return false;
+		}
+
+		static string TypeFingerprint(ILPatchTypeDefinitionSnapshot type) =>
+			string.Join("|", new[] {
+				type.Identity.ToCanonicalString(),
+				type.Namespace ?? string.Empty,
+				type.Name ?? string.Empty,
+				type.Attributes.ToString(System.Globalization.CultureInfo.InvariantCulture),
+				TypeSigFingerprint(type.BaseType),
+				type.DeclaringType?.ToCanonicalString() ?? string.Empty,
+				JoinSorted(type.Fields.Select(FieldFingerprint)),
+				JoinSorted(type.Methods.Select(MethodFingerprint)),
+				JoinSorted(type.Properties.Select(PropertyFingerprint)),
+				JoinSorted(type.Events.Select(EventFingerprint)),
+			});
+
+		static string FieldFingerprint(ILPatchFieldDefinitionSnapshot field) =>
+			$"{field.Identity.ToCanonicalString()}|{field.Attributes}|{TypeSigFingerprint(field.FieldType)}";
+
+		static string MethodFingerprint(ILPatchMethodDefinitionSnapshot method) =>
+			$"{method.Identity.ToCanonicalString()}|{method.Attributes}|{method.ImplAttributes}|" +
+			$"{MethodSigFingerprint(method.Signature)}|" +
+			$"{string.Join(";", method.Parameters.OrderBy(a => a.Sequence).Select(a => $"{a.Sequence}:{a.Name}:{a.Attributes}"))}|" +
+			$"{method.Body?.CanonicalHash ?? string.Empty}";
+
+		static string PropertyFingerprint(ILPatchPropertyDefinitionSnapshot property) =>
+			$"{property.Identity.ToCanonicalString()}|{property.Attributes}|{PropertySigFingerprint(property.Signature)}|" +
+			$"get={JoinSorted(property.GetMethods.Select(a => a.ToCanonicalString()))}|" +
+			$"set={JoinSorted(property.SetMethods.Select(a => a.ToCanonicalString()))}|" +
+			$"other={JoinSorted(property.OtherMethods.Select(a => a.ToCanonicalString()))}";
+
+		static string EventFingerprint(ILPatchEventDefinitionSnapshot @event) =>
+			$"{@event.Identity.ToCanonicalString()}|{@event.Attributes}|{TypeSigFingerprint(@event.EventType)}|" +
+			$"add={@event.AddMethod?.ToCanonicalString() ?? string.Empty}|" +
+			$"invoke={@event.InvokeMethod?.ToCanonicalString() ?? string.Empty}|" +
+			$"remove={@event.RemoveMethod?.ToCanonicalString() ?? string.Empty}|" +
+			$"other={JoinSorted(@event.OtherMethods.Select(a => a.ToCanonicalString()))}";
+
+		static string MethodSigFingerprint(ILPatchMethodSignatureSnapshot signature) =>
+			$"{signature.CallingConvention}:{signature.GenericParameterCount}:{TypeSigFingerprint(signature.ReturnType)}:" +
+			$"{string.Join(",", signature.Parameters.Select(TypeSigFingerprint))}:" +
+			$"{string.Join(",", signature.ParametersAfterSentinel.Select(TypeSigFingerprint))}";
+
+		static string PropertySigFingerprint(ILPatchPropertySignatureSnapshot signature) =>
+			$"{signature.HasThis}:{TypeSigFingerprint(signature.ReturnType)}:" +
+			$"{string.Join(",", signature.Parameters.Select(TypeSigFingerprint))}";
+
+		static string TypeSigFingerprint(ILPatchTypeSigSnapshot? type) {
+			if (type is null)
+				return string.Empty;
+			return $"{type.Kind}:{type.FullName}:{type.DefinitionAssembly}:{type.IsValueType}:{type.GenericIndex}:" +
+				$"{type.ArrayRank}:{string.Join(",", type.ArraySizes)}:{string.Join(",", type.ArrayLowerBounds)}:" +
+				$"elem=({TypeSigFingerprint(type.ElementType)}):mod=({TypeSigFingerprint(type.ModifierType)}):" +
+				$"args=({string.Join(",", type.GenericArguments.Select(TypeSigFingerprint))})";
+		}
+
+		static string JoinSorted(IEnumerable<string> values) =>
+			string.Join(";", values.OrderBy(a => a, StringComparer.Ordinal));
+	}
+
 	static class ILPatchStructuralSnapshotBuilder {
 
 		public static bool TryCreateType(TypeDef type, out ILPatchTypeDefinitionSnapshot? snapshot, out string error) {
