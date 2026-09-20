@@ -163,17 +163,6 @@ namespace dnSpy.AsmEditor.ILPatch {
 				}
 			}
 
-			// A single document must not both add and remove the exact same current member.
-			var addedFieldKeys = new HashSet<string>(addedFields.Select(a => ILPatchFieldIdentity.Create(a.Item2).ToCanonicalString()), StringComparer.Ordinal);
-			if (removedFields.Any(a => addedFieldKeys.Contains(ILPatchFieldIdentity.Create(a.Item2).ToCanonicalString()))) {
-				error = "The structural patch both adds and removes the same field identity.";
-				return false;
-			}
-			var addedMethodKeys = new HashSet<string>(addedMethods.Select(a => ILPatchMethodIdentity.Create(a.Item2).ToCanonicalString()), StringComparer.Ordinal);
-			if (removedMethods.Any(a => addedMethodKeys.Contains(ILPatchMethodIdentity.Create(a.Item2).ToCanonicalString()))) {
-				error = "The structural patch both adds and removes the same method identity.";
-				return false;
-			}
 
 			plan = new Plan(addedFields, addedMethods, removedFields, removedMethods);
 			return true;
