@@ -25,7 +25,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		internal sealed class Plan {
 			readonly ModuleDef module;
 			readonly List<(TypeDef? Parent, TypeDef Type)> addedTypes;
-			readonly List<(TypeDef? Parent, TypeDef Type, int Index)> removedTypes;
+			readonly List<(TypeDef? Parent, TypeDef Type, int Index, int Depth)> removedTypes;
 			readonly List<(TypeDef Type, FieldDef Field)> addedFields;
 			readonly List<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> addedMethods;
 			readonly List<(TypeDef Type, PropertyDef Property)> addedProperties;
@@ -43,7 +43,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			public ModuleDef Module => module;
 			public IReadOnlyList<(TypeDef? Parent, TypeDef Type)> AddedTypes => addedTypes;
-			public IReadOnlyList<(TypeDef? Parent, TypeDef Type, int Index)> RemovedTypes => removedTypes;
+			public IReadOnlyList<(TypeDef? Parent, TypeDef Type, int Index, int Depth)> RemovedTypes => removedTypes;
 			public IReadOnlyList<(TypeDef Type, FieldDef Field)> AddedFields => addedFields;
 			public IReadOnlyList<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> AddedMethodEntries => addedMethods;
 			public IReadOnlyList<(TypeDef Type, PropertyDef Property)> AddedProperties => addedProperties;
@@ -57,7 +57,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			internal Plan(ModuleDef module,
 				List<(TypeDef? Parent, TypeDef Type)> addedTypes,
-				List<(TypeDef? Parent, TypeDef Type, int Index)> removedTypes,
+				List<(TypeDef? Parent, TypeDef Type, int Index, int Depth)> removedTypes,
 				List<(TypeDef Type, FieldDef Field)> addedFields,
 				List<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> addedMethods,
 				List<(TypeDef Type, PropertyDef Property)> addedProperties,
@@ -130,7 +130,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					item.Type.Methods.Remove(item.Method);
 				foreach (var item in removedFields)
 					item.Type.Fields.Remove(item.Field);
-				foreach (var item in removedTypes.OrderByDescending(a => TypeDepth(a.Type))) {
+				foreach (var item in removedTypes.OrderByDescending(a => a.Depth)) {
 					if (item.Parent is null)
 						module.Types.Remove(item.Type);
 					else
@@ -147,7 +147,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					item.Type.Properties.Insert(item.Index, item.Property);
 				foreach (var item in removedEvents.OrderBy(a => a.Index))
 					item.Type.Events.Insert(item.Index, item.Event);
-				foreach (var item in removedTypes.OrderBy(a => TypeDepth(a.Type))) {
+				foreach (var item in removedTypes.OrderBy(a => a.Depth)) {
 					if (item.Parent is null)
 						module.Types.Insert(item.Index, item.Type);
 					else
@@ -173,7 +173,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			plan = null;
 			error = string.Empty;
 			var addedTypes = new List<(TypeDef? Parent, TypeDef Type)>();
-			var removedTypes = new List<(TypeDef? Parent, TypeDef Type, int Index)>();
+			var removedTypes = new List<(TypeDef? Parent, TypeDef Type, int Index, int Depth)>();
 			var addedFields = new List<(TypeDef, FieldDef)>();
 			var addedMethods = new List<(TypeDef, MethodDef, ILPatchMethodBodySnapshot?)>();
 			var addedProperties = new List<(TypeDef, PropertyDef)>();
@@ -259,7 +259,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 							error = $"Removed type '{change.Target}' is not attached to its expected owner.";
 							return false;
 						}
-						removedTypes.Add((parent, type, index));
+						removedTypes.Add((parent, type, index, TypeDepth(type)));
 						continue;
 					}
 				}
