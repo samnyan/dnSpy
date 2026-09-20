@@ -44,6 +44,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(DiffEngineAlignsModifiedLines), DiffEngineAlignsModifiedLines),
 				(nameof(DiffEngineTracksAddedAndRemovedLines), DiffEngineTracksAddedAndRemovedLines),
 				(nameof(DiffEngineKeepsStableAnchors), DiffEngineKeepsStableAnchors),
+				(nameof(InlineDiffHighlightsSeparatedTokenChanges), InlineDiffHighlightsSeparatedTokenChanges),
+				(nameof(InlineDiffLeavesIdenticalLineUnchanged), InlineDiffLeavesIdenticalLineUnchanged),
 				(nameof(RepositoryCommitHistoryAndExportRoundTrip), RepositoryCommitHistoryAndExportRoundTrip),
 				(nameof(RepositoryRejectsDivergedWorkingTree), RepositoryRejectsDivergedWorkingTree),
 				(nameof(RepositoryCommitCanRevertParentChange), RepositoryCommitCanRevertParentChange),
@@ -790,6 +792,37 @@ namespace dnSpy.AsmEditor.ILPatch {
 			True(document is null, "Failed creation must not return a partial patch document.");
 			True(report.UnsupportedReasons.Any(a => a.Contains("added method", StringComparison.OrdinalIgnoreCase)),
 				"Create report should identify the added method.");
+		}
+
+		static void InlineDiffHighlightsSeparatedTokenChanges() {
+			var diff = ILPatchInlineDiffEngine.Compare(
+				"if (score > 10 && mode == 1)",
+				"if (score >= 20 && mode == 2)");
+
+			string leftChanged = string.Concat(diff.Left.Where(a => a.IsChanged).Select(a => a.Text));
+			string rightChanged = string.Concat(diff.Right.Where(a => a.IsChanged).Select(a => a.Text));
+			True(leftChanged.Contains(">", StringComparison.Ordinal),
+				"Left inline diff should mark the old comparison operator.");
+			True(leftChanged.Contains("10", StringComparison.Ordinal),
+				"Left inline diff should mark the old threshold.");
+			True(leftChanged.Contains("1", StringComparison.Ordinal),
+				"Left inline diff should mark the old mode value.");
+			True(rightChanged.Contains(">=", StringComparison.Ordinal),
+				"Right inline diff should mark the new comparison operator.");
+			True(rightChanged.Contains("20", StringComparison.Ordinal),
+				"Right inline diff should mark the new threshold.");
+			True(rightChanged.Contains("2", StringComparison.Ordinal),
+				"Right inline diff should mark the new mode value.");
+			True(diff.Left.Any(a => !a.IsChanged && a.Text.Contains("score", StringComparison.Ordinal)),
+				"Stable tokens should remain unhighlighted.");
+		}
+
+		static void InlineDiffLeavesIdenticalLineUnchanged() {
+			var diff = ILPatchInlineDiffEngine.Compare("return value;", "return value;");
+			Equal(1, diff.Left.Count, "Identical left line should collapse to one fragment.");
+			Equal(1, diff.Right.Count, "Identical right line should collapse to one fragment.");
+			False(diff.Left[0].IsChanged, "Identical left line must not be highlighted.");
+			False(diff.Right[0].IsChanged, "Identical right line must not be highlighted.");
 		}
 
 		static void RepositoryCommitHistoryAndExportRoundTrip() {

@@ -43,6 +43,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly ComboBox moduleSelector;
 		readonly TextBlock repositoryStatus;
 		readonly TextBlock workingStatus;
+		readonly TextBlock diskStatus;
 		readonly Button initializeButton;
 		readonly Button commitButton;
 		readonly TextBox commitMessage;
@@ -56,6 +57,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		ILPatchRepository? repository;
 		LoadedModuleChoice? selectedModule;
 		ILPatchDocument? selectedDelta;
+		bool workingBaseValid;
+		int workingChangeCount;
 
 		public ILPatchRepositoryWindow(IDsDocumentService documentService, IDecompilerService decompilerService) {
 			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
@@ -121,6 +124,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Margin = new Thickness(0, 3, 0, 0),
 			};
 			statusPanel.Children.Add(workingStatus);
+
+			diskStatus = new TextBlock {
+				TextWrapping = TextWrapping.Wrap,
+				Margin = new Thickness(0, 3, 0, 0),
+			};
+			statusPanel.Children.Add(diskStatus);
 
 			var commitBar = new DockPanel {
 				LastChildFill = true,
@@ -215,6 +224,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			Content = root;
 			ILPatchWorkspace.Instance.Changed += Workspace_Changed;
+			documentService.CollectionChanged += DocumentService_CollectionChanged;
 			Closed += RepositoryWindow_Closed;
 			RefreshModules();
 		}
@@ -237,8 +247,18 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Width = new DataGridLength(width, DataGridLengthUnitType.Star),
 			};
 
-		void RepositoryWindow_Closed(object? sender, EventArgs e) =>
+		void RepositoryWindow_Closed(object? sender, EventArgs e) {
 			ILPatchWorkspace.Instance.Changed -= Workspace_Changed;
+			documentService.CollectionChanged -= DocumentService_CollectionChanged;
+		}
+
+		void DocumentService_CollectionChanged(object? sender, NotifyDocumentCollectionChangedEventArgs e) {
+			var preserve = selectedModule?.Module;
+			if (Dispatcher.CheckAccess())
+				RefreshModules(preserve);
+			else
+				Dispatcher.BeginInvoke(new Action(() => RefreshModules(preserve)));
+		}
 
 		void Workspace_Changed(object? sender, EventArgs e) {
 			if (Dispatcher.CheckAccess())
@@ -274,6 +294,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				repository = null;
 				repositoryStatus.Text = "No disk-backed managed modules are currently loaded.";
 				workingStatus.Text = string.Empty;
+				diskStatus.Text = string.Empty;
 				RefreshHistory();
 			}
 		}
@@ -287,6 +308,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 			repository = null;
 			if (selectedModule is null) {
 				repositoryStatus.Text = "Select a loaded managed module.";
+				workingStatus.Text = string.Empty;
+				diskStatus.Text = string.Empty;
 				initializeButton.IsEnabled = false;
 				RefreshHistory();
 				return;
@@ -311,6 +334,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 			RefreshHistory();
 			RefreshWorkingState();
+			RefreshDiskStatus();
 		}
 
 		void InitializeButton_Click(object sender, RoutedEventArgs e) {
@@ -322,6 +346,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				initializeButton.IsEnabled = false;
 				RefreshHistory();
 				RefreshWorkingState();
+				RefreshDiskStatus();
 			}
 			catch (Exception ex) {
 				MessageBox.Show(this, ex.Message, "Could not initialize .dnspy repository",
@@ -330,35 +355,45 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		void RefreshWorkingState() {
+			workingBaseValid = false;
+			workingChangeCount = 0;
 			if (selectedModule is null) {
 				workingStatus.Text = string.Empty;
-				commitButton.IsEnabled = false;
+				UpdateCommitButton();
 				return;
 			}
 
 			var changes = ILPatchWorkspace.Instance.GetEffectiveChanges(selectedModule.Module);
+			workingChangeCount = changes.Count;
 			if (repository is null) {
 				workingStatus.Text = changes.Count == 0
 					? "Working tree: clean (repository not initialized)."
 					: $"Working tree: {changes.Count} tracked method change(s) (repository not initialized).";
-				commitButton.IsEnabled = false;
+				UpdateCommitButton();
 				return;
 			}
 
 			bool valid = repository.TryValidateWorkingBase(selectedModule.Module, changes, out string error);
 			if (!valid) {
 				workingStatus.Text = "Working tree cannot be committed: " + error;
-				commitButton.IsEnabled = false;
+				UpdateCommitButton();
 				return;
 			}
 
+			workingBaseValid = true;
 			workingStatus.Text = changes.Count == 0
 				? "Working tree: clean."
 				: $"Working tree: {changes.Count} uncommitted method change(s).";
-			commitButton.IsEnabled = changes.Count != 0 && !string.IsNullOrWhiteSpace(commitMessage.Text);
+			UpdateCommitButton();
 		}
 
-		void CommitMessage_TextChanged(object sender, TextChangedEventArgs e) => RefreshWorkingState();
+		void CommitMessage_TextChanged(object sender, TextChangedEventArgs e) => UpdateCommitButton();
+
+		void UpdateCommitButton() =>
+			commitButton.IsEnabled = repository is not null &&
+				workingBaseValid &&
+				workingChangeCount != 0 &&
+				!string.IsNullOrWhiteSpace(commitMessage.Text);
 
 		void CommitButton_Click(object sender, RoutedEventArgs e) {
 			if (repository is null || selectedModule is null)
@@ -378,10 +413,46 @@ namespace dnSpy.AsmEditor.ILPatch {
 					$"Repository: {repository.RepositoryPath}   HEAD: {ShortHash(commit.Id)}";
 				RefreshHistory(commit.Id);
 				RefreshWorkingState();
+				RefreshDiskStatus();
 			}
 			catch (Exception ex) {
 				MessageBox.Show(this, ex.Message, "Could not commit working changes",
 					MessageBoxButton.OK, MessageBoxImage.Error);
+			}
+		}
+
+		void RefreshDiskStatus() {
+			if (selectedModule is null) {
+				diskStatus.Text = string.Empty;
+				return;
+			}
+			if (repository is null) {
+				diskStatus.Text = "Disk working DLL: repository not initialized.";
+				return;
+			}
+
+			try {
+				using var diskModule = ModuleDefMD.Load(selectedModule.Filename);
+				string diskState = ILPatchModuleStateHasher.Compute(diskModule);
+				string expectedHead = repository.Metadata.HeadCommitId is null
+					? repository.Metadata.RootStateHash
+					: repository.LoadCommit(repository.Metadata.HeadCommitId).StateHash;
+				if (StringComparer.Ordinal.Equals(diskState, expectedHead)) {
+					diskStatus.Text = "Disk working DLL: matches repository HEAD.";
+				}
+				else if (StringComparer.Ordinal.Equals(diskState, repository.Metadata.RootStateHash)) {
+					diskStatus.Text =
+						"Disk working DLL: still at ROOT while repository HEAD is newer. " +
+						"Before closing dnSpy, use the normal Save Module command if you want the on-disk working DLL to reopen at HEAD.";
+				}
+				else {
+					diskStatus.Text =
+						"Disk working DLL: does not match repository HEAD. This can be an unsaved/older/different state; " +
+						"Refresh after saving or export a known commit explicitly.";
+				}
+			}
+			catch (Exception ex) {
+				diskStatus.Text = "Could not verify disk working DLL: " + ex.Message;
 			}
 		}
 

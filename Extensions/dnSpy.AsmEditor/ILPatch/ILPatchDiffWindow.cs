@@ -15,6 +15,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Documents;
 using System.Windows.Media;
 using dnlib.DotNet;
 using dnSpy.Contracts.Decompiler;
@@ -108,6 +109,42 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (lines.Length != 0 && lines[lines.Length - 1].Length == 0)
 				return lines.Take(lines.Length - 1).ToArray();
 			return lines;
+		}
+	}
+
+	sealed class ILPatchInlineDiffTextBlock : TextBlock {
+		public static readonly DependencyProperty FragmentsProperty =
+			DependencyProperty.Register(nameof(Fragments), typeof(IEnumerable<ILPatchInlineFragment>),
+				typeof(ILPatchInlineDiffTextBlock),
+				new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender, OnFragmentsChanged));
+		public static readonly DependencyProperty ChangedBackgroundProperty =
+			DependencyProperty.Register(nameof(ChangedBackground), typeof(Brush),
+				typeof(ILPatchInlineDiffTextBlock),
+				new FrameworkPropertyMetadata(Brushes.Transparent, FrameworkPropertyMetadataOptions.AffectsRender, OnFragmentsChanged));
+
+		public IEnumerable<ILPatchInlineFragment>? Fragments {
+			get => (IEnumerable<ILPatchInlineFragment>?)GetValue(FragmentsProperty);
+			set => SetValue(FragmentsProperty, value);
+		}
+
+		public Brush ChangedBackground {
+			get => (Brush)GetValue(ChangedBackgroundProperty);
+			set => SetValue(ChangedBackgroundProperty, value);
+		}
+
+		static void OnFragmentsChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) =>
+			((ILPatchInlineDiffTextBlock)d).Rebuild();
+
+		void Rebuild() {
+			Inlines.Clear();
+			foreach (var fragment in Fragments ?? Array.Empty<ILPatchInlineFragment>()) {
+				var run = new Run(fragment.Text);
+				if (fragment.IsChanged) {
+					run.FontWeight = FontWeights.SemiBold;
+					run.Background = ChangedBackground;
+				}
+				Inlines.Add(run);
+			}
 		}
 	}
 
@@ -219,10 +256,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 				VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
 			};
 			diffGrid.Columns.Add(TextColumn("Old", nameof(DiffDisplayRow.LeftLine), 0.45));
-			diffGrid.Columns.Add(TextColumn("Original / Base", nameof(DiffDisplayRow.LeftText), 4));
+			diffGrid.Columns.Add(InlineColumn("Original / Base", nameof(DiffDisplayRow.LeftFragments), 4,
+				new SolidColorBrush(Color.FromArgb(120, 220, 70, 70))));
 			diffGrid.Columns.Add(TextColumn("", nameof(DiffDisplayRow.Marker), 0.35));
 			diffGrid.Columns.Add(TextColumn("New", nameof(DiffDisplayRow.RightLine), 0.45));
-			diffGrid.Columns.Add(TextColumn("Patched", nameof(DiffDisplayRow.RightText), 4));
+			diffGrid.Columns.Add(InlineColumn("Patched", nameof(DiffDisplayRow.RightFragments), 4,
+				new SolidColorBrush(Color.FromArgb(120, 40, 180, 80))));
 			diffGrid.LoadingRow += DiffGrid_LoadingRow;
 			Grid.SetRow(diffGrid, 2);
 			root.Children.Add(diffGrid);
@@ -237,6 +276,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Binding = new Binding(property),
 				Width = new DataGridLength(width, DataGridLengthUnitType.Star),
 			};
+
+		static DataGridTemplateColumn InlineColumn(string header, string property, double width, Brush changedBackground) {
+			var factory = new FrameworkElementFactory(typeof(ILPatchInlineDiffTextBlock));
+			factory.SetBinding(ILPatchInlineDiffTextBlock.FragmentsProperty, new Binding(property));
+			factory.SetValue(ILPatchInlineDiffTextBlock.ChangedBackgroundProperty, changedBackground);
+			factory.SetValue(TextBlock.FontFamilyProperty, new FontFamily("Consolas"));
+			factory.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
+			return new DataGridTemplateColumn {
+				Header = header,
+				CellTemplate = new DataTemplate { VisualTree = factory },
+				Width = new DataGridLength(width, DataGridLengthUnitType.Star),
+			};
+		}
 
 		void ModeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e) {
 			if (IsLoaded || Content is not null)
@@ -383,9 +435,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 			public bool IsSeparator { get; }
 			public string LeftLine { get; }
 			public string LeftText { get; }
+			public IReadOnlyList<ILPatchInlineFragment> LeftFragments { get; }
 			public string Marker { get; }
 			public string RightLine { get; }
 			public string RightText { get; }
+			public IReadOnlyList<ILPatchInlineFragment> RightFragments { get; }
 
 			DiffDisplayRow(int hiddenCount) {
 				Kind = ILPatchDiffKind.Same;
@@ -395,6 +449,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Marker = "…";
 				LeftText = $"… {hiddenCount} unchanged line(s) …";
 				RightText = LeftText;
+				LeftFragments = new[] { new ILPatchInlineFragment(LeftText, false) };
+				RightFragments = new[] { new ILPatchInlineFragment(RightText, false) };
 			}
 
 			public static DiffDisplayRow Separator(int hiddenCount) => new DiffDisplayRow(hiddenCount);
@@ -405,6 +461,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 				LeftText = row.LeftText;
 				RightLine = row.RightLineNumber?.ToString() ?? string.Empty;
 				RightText = row.RightText;
+				if (row.Kind == ILPatchDiffKind.Modified) {
+					var inline = ILPatchInlineDiffEngine.Compare(row.LeftText, row.RightText);
+					LeftFragments = inline.Left;
+					RightFragments = inline.Right;
+				}
+				else {
+					LeftFragments = new[] {
+						new ILPatchInlineFragment(row.LeftText, row.Kind == ILPatchDiffKind.Removed),
+					};
+					RightFragments = new[] {
+						new ILPatchInlineFragment(row.RightText, row.Kind == ILPatchDiffKind.Added),
+					};
+				}
 				switch (row.Kind) {
 				case ILPatchDiffKind.Added:
 					Marker = "+";

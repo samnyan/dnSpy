@@ -220,6 +220,8 @@ edit again → next commit
 
 A successful repository commit accepts only that module's current tracked state as the next clean Workspace baseline; other loaded modules are untouched. History shows `HEAD` explicitly. Selecting a commit reconstructs its **parent → commit** semantic delta, and double-clicking a changed method opens the same Normalized IL / Decompiled C# diff viewer used by the working tree. **Export Selected Commit DLL...** materializes any commit (or ROOT) from the immutable repository base and verifies its recorded semantic state hash before writing. Export deliberately refuses to overwrite the currently tracked working DLL; destructive checkout is kept separate from historical export semantics.
 
+Repository mode also distinguishes the in-memory working tree from the DLL currently on disk. The window reports whether the disk file matches HEAD, is still at ROOT/behind HEAD, or differs from both. After committing in-memory edits, use dnSpy's normal **Save Module** before closing if you want the next session to reopen directly on HEAD; repository commits themselves never silently overwrite the working DLL.
+
 ### Side-by-side patch diff
 
 Tracked workspace changes and imported patch entries can be opened in a dedicated **Compare** window (or by double-clicking the row). The viewer keeps both sides vertically aligned in one grid and classifies each line as unchanged, added, removed, or modified.
@@ -232,6 +234,8 @@ Two review projections are available:
 The C# diff deliberately never becomes the source of truth for apply/rebase decisions; decompiler output can change across decompiler versions even when IL semantics do not.
 
 The viewer is optimized for code-review rather than raw text dumping: unchanged regions are collapsed to three context lines around each change by default, **Show all unchanged** expands the complete method, and **Previous change / Next change** jumps between added/removed/modified rows. A compact summary shows the number of changed, added, removed and modified aligned rows. Because both sides are rendered as one aligned table, scrolling is inherently synchronized between Base and Patched.
+
+Modified rows also receive a token-level inline diff. Identifiers/numbers, whitespace runs and punctuation are compared independently with a small LCS, so C# review can highlight the exact changed tokens inside a line instead of only tinting the entire row. Large pathological lines fall back to whole-line highlighting to keep review responsive.
 
 ### Recommended GUI workflow
 
