@@ -31,6 +31,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using dnlib.DotNet;
 using dnSpy.AsmEditor.Commands;
+using dnSpy.AsmEditor.Compiler;
 using dnSpy.AsmEditor.UndoRedo;
 using dnSpy.Contracts.App;
 using dnSpy.Contracts.Controls;
@@ -42,7 +43,10 @@ using dnSpy.Contracts.Menus;
 using dnSpy.Contracts.MVVM;
 using dnSpy.Contracts.ToolWindows;
 using dnSpy.Contracts.ToolWindows.App;
+using dnSpy.Contracts.Text.Editor;
 using Microsoft.Win32;
+using Microsoft.VisualStudio.Text;
+using Microsoft.VisualStudio.Utilities;
 
 namespace dnSpy.AsmEditor.ILPatch {
 	[ExportAutoLoaded]
@@ -70,16 +74,29 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly IMethodAnnotations methodAnnotations;
 		readonly IAppService appService;
 		readonly IDecompilerService decompilerService;
+		readonly ITextBufferFactoryService textBufferFactoryService;
+		readonly IDsTextEditorFactoryService textEditorFactoryService;
+		readonly IContentTypeRegistryService contentTypeRegistryService;
+		readonly Lazy<IAddUpdatedNodesHelperProvider> addUpdatedNodesHelperProvider;
+		readonly EditCodeVMCreator editCodeVMCreator;
 		ILPatchToolWindowContent? content;
 
 		[ImportingConstructor]
 		ILPatchToolWindowContentProvider(IDsDocumentService documentService, IUndoCommandService undoCommandService,
-			IMethodAnnotations methodAnnotations, IAppService appService, IDecompilerService decompilerService) {
+			IMethodAnnotations methodAnnotations, IAppService appService, IDecompilerService decompilerService,
+			ITextBufferFactoryService textBufferFactoryService, IDsTextEditorFactoryService textEditorFactoryService,
+			IContentTypeRegistryService contentTypeRegistryService,
+			Lazy<IAddUpdatedNodesHelperProvider> addUpdatedNodesHelperProvider, EditCodeVMCreator editCodeVMCreator) {
 			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
 			this.undoCommandService = undoCommandService ?? throw new ArgumentNullException(nameof(undoCommandService));
 			this.methodAnnotations = methodAnnotations ?? throw new ArgumentNullException(nameof(methodAnnotations));
 			this.appService = appService ?? throw new ArgumentNullException(nameof(appService));
 			this.decompilerService = decompilerService ?? throw new ArgumentNullException(nameof(decompilerService));
+			this.textBufferFactoryService = textBufferFactoryService ?? throw new ArgumentNullException(nameof(textBufferFactoryService));
+			this.textEditorFactoryService = textEditorFactoryService ?? throw new ArgumentNullException(nameof(textEditorFactoryService));
+			this.contentTypeRegistryService = contentTypeRegistryService ?? throw new ArgumentNullException(nameof(contentTypeRegistryService));
+			this.addUpdatedNodesHelperProvider = addUpdatedNodesHelperProvider ?? throw new ArgumentNullException(nameof(addUpdatedNodesHelperProvider));
+			this.editCodeVMCreator = editCodeVMCreator ?? throw new ArgumentNullException(nameof(editCodeVMCreator));
 		}
 
 		public IEnumerable<ToolWindowContentInfo> ContentInfos {
@@ -89,7 +106,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public ToolWindowContent? GetOrCreate(Guid guid) {
 			if (guid != ILPatchToolWindowContent.THE_GUID)
 				return null;
-			return content ??= new ILPatchToolWindowContent(documentService, undoCommandService, methodAnnotations, appService, decompilerService);
+			return content ??= new ILPatchToolWindowContent(documentService, undoCommandService, methodAnnotations, appService,
+				decompilerService, textBufferFactoryService, textEditorFactoryService, contentTypeRegistryService,
+				addUpdatedNodesHelperProvider, editCodeVMCreator);
 		}
 	}
 
@@ -100,8 +119,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly ILPatchWorkspaceControl control;
 
 		public ILPatchToolWindowContent(IDsDocumentService documentService, IUndoCommandService undoCommandService,
-			IMethodAnnotations methodAnnotations, IAppService appService, IDecompilerService decompilerService) =>
-			control = new ILPatchWorkspaceControl(documentService, undoCommandService, methodAnnotations, appService, decompilerService);
+			IMethodAnnotations methodAnnotations, IAppService appService, IDecompilerService decompilerService,
+			ITextBufferFactoryService textBufferFactoryService, IDsTextEditorFactoryService textEditorFactoryService,
+			IContentTypeRegistryService contentTypeRegistryService,
+			Lazy<IAddUpdatedNodesHelperProvider> addUpdatedNodesHelperProvider, EditCodeVMCreator editCodeVMCreator) =>
+			control = new ILPatchWorkspaceControl(documentService, undoCommandService, methodAnnotations, appService,
+				decompilerService, textBufferFactoryService, textEditorFactoryService, contentTypeRegistryService,
+				addUpdatedNodesHelperProvider, editCodeVMCreator);
 
 		public override Guid Guid => THE_GUID;
 		public override string Title => "IL Patch Workspace";
@@ -116,6 +140,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly IMethodAnnotations methodAnnotations;
 		readonly IAppService appService;
 		readonly IDecompilerService decompilerService;
+		readonly ITextBufferFactoryService textBufferFactoryService;
+		readonly IDsTextEditorFactoryService textEditorFactoryService;
+		readonly IContentTypeRegistryService contentTypeRegistryService;
+		readonly Lazy<IAddUpdatedNodesHelperProvider> addUpdatedNodesHelperProvider;
+		readonly EditCodeVMCreator editCodeVMCreator;
+		readonly Lazy<IUndoCommandService> lazyUndoCommandService;
 		readonly ObservableCollection<ChangeRow> changes = new ObservableCollection<ChangeRow>();
 		readonly ObservableCollection<ImportRow> imports = new ObservableCollection<ImportRow>();
 		readonly ObservableCollection<HistoryRow> history = new ObservableCollection<HistoryRow>();
@@ -131,6 +161,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly ComboBox candidateSelector;
 		readonly Button useCandidateButton;
 		readonly Button clearCandidateButton;
+		readonly Button manualMergeButton;
 		readonly Button revertButton;
 		readonly Button compareChangeButton;
 		readonly Button compareImportButton;
@@ -149,12 +180,21 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public DataGrid ChangesGrid { get; }
 
 		public ILPatchWorkspaceControl(IDsDocumentService documentService, IUndoCommandService undoCommandService,
-			IMethodAnnotations methodAnnotations, IAppService appService, IDecompilerService decompilerService) {
+			IMethodAnnotations methodAnnotations, IAppService appService, IDecompilerService decompilerService,
+			ITextBufferFactoryService textBufferFactoryService, IDsTextEditorFactoryService textEditorFactoryService,
+			IContentTypeRegistryService contentTypeRegistryService,
+			Lazy<IAddUpdatedNodesHelperProvider> addUpdatedNodesHelperProvider, EditCodeVMCreator editCodeVMCreator) {
 			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
 			this.undoCommandService = undoCommandService ?? throw new ArgumentNullException(nameof(undoCommandService));
 			this.methodAnnotations = methodAnnotations ?? throw new ArgumentNullException(nameof(methodAnnotations));
 			this.appService = appService ?? throw new ArgumentNullException(nameof(appService));
 			this.decompilerService = decompilerService ?? throw new ArgumentNullException(nameof(decompilerService));
+			this.textBufferFactoryService = textBufferFactoryService ?? throw new ArgumentNullException(nameof(textBufferFactoryService));
+			this.textEditorFactoryService = textEditorFactoryService ?? throw new ArgumentNullException(nameof(textEditorFactoryService));
+			this.contentTypeRegistryService = contentTypeRegistryService ?? throw new ArgumentNullException(nameof(contentTypeRegistryService));
+			this.addUpdatedNodesHelperProvider = addUpdatedNodesHelperProvider ?? throw new ArgumentNullException(nameof(addUpdatedNodesHelperProvider));
+			this.editCodeVMCreator = editCodeVMCreator ?? throw new ArgumentNullException(nameof(editCodeVMCreator));
+			lazyUndoCommandService = new Lazy<IUndoCommandService>(() => this.undoCommandService);
 
 			var root = new Grid { Margin = new Thickness(8) };
 			root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -405,6 +445,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 			clearCandidateButton.Click += ClearCandidateButton_Click;
 			candidateButtons.Children.Add(clearCandidateButton);
+
+			manualMergeButton = new Button {
+				Content = "Manual Merge...",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Open the selected candidate (even with a changed signature) in dnSpy's normal Edit Method (C#) dialog. The diff itself stays read-only; copy the patch selection from Compare Patch first and merge it manually.",
+			};
+			manualMergeButton.Click += ManualMergeButton_Click;
+			candidateButtons.Children.Add(manualMergeButton);
 			DockPanel.SetDock(candidateButtons, Dock.Right);
 			candidateBar.Children.Add(candidateButtons);
 
@@ -543,7 +593,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		void RepositoryButton_Click(object sender, RoutedEventArgs e) {
 			var window = new ILPatchRepositoryWindow(
-				documentService, undoCommandService, methodAnnotations, appService, decompilerService) {
+				documentService, undoCommandService, methodAnnotations, appService, decompilerService,
+				textBufferFactoryService, textEditorFactoryService, contentTypeRegistryService) {
 				Owner = Window.GetWindow(this),
 			};
 			window.Show();
@@ -788,6 +839,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			candidateSelector.IsEnabled = false;
 			useCandidateButton.IsEnabled = false;
 			clearCandidateButton.IsEnabled = false;
+			manualMergeButton.IsEnabled = false;
 			compareImportButton.IsEnabled = false;
 			clearImportButton.IsEnabled = false;
 			refreshImportButton.IsEnabled = false;
@@ -1033,20 +1085,22 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		void ShowDiffWindow(ILPatchMethodChange change, MethodDef? target) {
-			var window = new ILPatchDiffWindow(change, target, decompilerService) {
+			var window = new ILPatchDiffWindow(change, target, decompilerService,
+				textBufferFactoryService, textEditorFactoryService, contentTypeRegistryService) {
 				Owner = Window.GetWindow(this),
 			};
 			window.Show();
 		}
 
 		void CandidateSelector_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
-			UpdateUseCandidateButton();
+			UpdateCandidateActionButtons();
 
 		void UpdateCandidateControls(ImportRow? row) {
 			candidateSelector.Items.Clear();
 			candidateSelector.IsEnabled = false;
 			useCandidateButton.IsEnabled = false;
 			clearCandidateButton.IsEnabled = false;
+			manualMergeButton.IsEnabled = false;
 			if (row is null)
 				return;
 
@@ -1066,13 +1120,32 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			candidateSelector.IsEnabled = candidateSelector.Items.Count != 0;
 			candidateSelector.SelectedItem = selectedChoice ?? candidateSelector.Items.Cast<object>().FirstOrDefault();
-			UpdateUseCandidateButton();
+			UpdateCandidateActionButtons();
 		}
 
-		void UpdateUseCandidateButton() {
+		void UpdateCandidateActionButtons() {
 			var row = importGrid.SelectedItem as ImportRow;
 			var choice = candidateSelector.SelectedItem as CandidateChoice;
 			useCandidateButton.IsEnabled = row is not null && choice?.IsCompatible == true;
+			manualMergeButton.IsEnabled = row is not null && (choice?.Candidate.Method is not null || row.Result.Target is not null);
+		}
+
+		void ManualMergeButton_Click(object sender, RoutedEventArgs e) {
+			var row = importGrid.SelectedItem as ImportRow;
+			if (row is null)
+				return;
+			var choice = candidateSelector.SelectedItem as CandidateChoice;
+			MethodDef? targetMethod = choice?.Candidate.Method ?? row.Result.Target;
+			if (targetMethod is null)
+				return;
+			var methodNode = appService.DocumentTreeView.FindNode(targetMethod) as MethodNode;
+			if (methodNode is null) {
+				MsgBox.Instance.Show($"Could not find the dnSpy document tree node for '{targetMethod.FullName}'.");
+				return;
+			}
+			EditMethodBodyCodeCommand.Execute(editCodeVMCreator, addUpdatedNodesHelperProvider,
+				lazyUndoCommandService, appService, new DocumentTreeNodeData[] { methodNode });
+			RefreshImportedPreview();
 		}
 
 		void UseCandidateButton_Click(object sender, RoutedEventArgs e) {

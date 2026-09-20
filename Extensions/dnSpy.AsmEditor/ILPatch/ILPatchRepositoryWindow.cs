@@ -33,7 +33,10 @@ using dnSpy.Contracts.App;
 using dnSpy.Contracts.Decompiler;
 using dnSpy.Contracts.Documents;
 using dnSpy.Contracts.Documents.TreeView;
+using dnSpy.Contracts.Text.Editor;
 using Microsoft.Win32;
+using Microsoft.VisualStudio.Text;
+using Microsoft.VisualStudio.Utilities;
 
 namespace dnSpy.AsmEditor.ILPatch {
 	/// <summary>
@@ -47,6 +50,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly IMethodAnnotations methodAnnotations;
 		readonly IAppService appService;
 		readonly IDecompilerService decompilerService;
+		readonly ITextBufferFactoryService textBufferFactoryService;
+		readonly IDsTextEditorFactoryService textEditorFactoryService;
+		readonly IContentTypeRegistryService contentTypeRegistryService;
 		readonly ComboBox moduleSelector;
 		readonly TextBlock repositoryStatus;
 		readonly TextBlock workingStatus;
@@ -73,12 +79,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		public ILPatchRepositoryWindow(IDsDocumentService documentService,
 			IUndoCommandService undoCommandService, IMethodAnnotations methodAnnotations,
-			IAppService appService, IDecompilerService decompilerService) {
+			IAppService appService, IDecompilerService decompilerService,
+			ITextBufferFactoryService textBufferFactoryService, IDsTextEditorFactoryService textEditorFactoryService,
+			IContentTypeRegistryService contentTypeRegistryService) {
 			this.documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
 			this.undoCommandService = undoCommandService ?? throw new ArgumentNullException(nameof(undoCommandService));
 			this.methodAnnotations = methodAnnotations ?? throw new ArgumentNullException(nameof(methodAnnotations));
 			this.appService = appService ?? throw new ArgumentNullException(nameof(appService));
 			this.decompilerService = decompilerService ?? throw new ArgumentNullException(nameof(decompilerService));
+			this.textBufferFactoryService = textBufferFactoryService ?? throw new ArgumentNullException(nameof(textBufferFactoryService));
+			this.textEditorFactoryService = textEditorFactoryService ?? throw new ArgumentNullException(nameof(textEditorFactoryService));
+			this.contentTypeRegistryService = contentTypeRegistryService ?? throw new ArgumentNullException(nameof(contentTypeRegistryService));
 
 			Title = "dnSpy Change Repository";
 			Width = 1320;
@@ -517,7 +528,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				workingChangesGrid.SelectedItem is not RepositoryWorkingRow row)
 				return;
 			MethodDef? target = FindMethod(selectedModule.Module, row.Change.Target);
-			var window = new ILPatchDiffWindow(row.Change, target, decompilerService) { Owner = this };
+			var window = new ILPatchDiffWindow(row.Change, target, decompilerService,
+				textBufferFactoryService, textEditorFactoryService, contentTypeRegistryService) { Owner = this };
 			window.Show();
 		}
 
