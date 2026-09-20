@@ -76,6 +76,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		ILPatchDocument? selectedDelta;
 		bool workingBaseValid;
 		int workingChangeCount;
+		int workingStructuralSetCount;
 
 		public ILPatchRepositoryWindow(IDsDocumentService documentService,
 			IUndoCommandService undoCommandService, IMethodAnnotations methodAnnotations,
@@ -212,7 +213,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Width = new DataGridLength(0.55, DataGridLengthUnitType.Star),
 			});
 			workingChangesGrid.Columns.Add(new DataGridTextColumn {
-				Header = "Method",
+				Header = "Target",
 				Binding = new Binding(nameof(RepositoryWorkingRow.Method)),
 				Width = new DataGridLength(3.8, DataGridLengthUnitType.Star),
 				IsReadOnly = true,
@@ -470,10 +471,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		void RefreshWorkingState() {
 			var previousStageState = workingRows.ToDictionary(
-				a => a.Change.Target.ToCanonicalString(), a => a.IsStaged, StringComparer.Ordinal);
+				a => a.Key, a => a.IsStaged, StringComparer.Ordinal);
 			workingRows.Clear();
 			workingBaseValid = false;
 			workingChangeCount = 0;
+			workingStructuralSetCount = 0;
 			if (selectedModule is null) {
 				workingStatus.Text = string.Empty;
 				UpdateCommitButton();
@@ -483,7 +485,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var changes = ILPatchWorkspace.Instance.GetEffectiveChanges(selectedModule.Module);
 			workingChangeCount = changes.Count;
 			foreach (var change in changes) {
-				string key = change.Target.ToCanonicalString();
+				string key = "M|" + change.Target.ToCanonicalString();
 				workingRows.Add(new RepositoryWorkingRow {
 					Change = change,
 					IsStaged = !previousStageState.TryGetValue(key, out bool wasStaged) || wasStaged,
@@ -500,11 +502,23 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return;
 			}
 
-			bool valid = repository.TryValidateWorkingBase(selectedModule.Module, changes, out string error);
-			if (!valid) {
+			if (!repository.TryGetWorkingDelta(selectedModule.Module, changes, out var delta, out string error) ||
+				delta is null) {
 				workingStatus.Text = "Working tree cannot be committed: " + error;
 				UpdateCommitButton();
 				return;
+			}
+
+			foreach (var typeChange in delta.TypeChanges.Where(a => a.HasEffectiveChange)) {
+				string key = "T|" + typeChange.Target.ToCanonicalString();
+				workingRows.Add(new RepositoryWorkingRow {
+					StructuralChange = typeChange,
+					IsStaged = !previousStageState.TryGetValue(key, out bool wasStaged) || wasStaged,
+					Method = "[Type] " + typeChange.Target,
+					BaseHash = "structure",
+					CurrentHash = DescribeStructuralChange(typeChange),
+				});
+				workingStructuralSetCount++;
 			}
 
 			workingBaseValid = true;
@@ -512,11 +526,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 			UpdateCommitButton();
 		}
 
+		static string DescribeStructuralChange(ILPatchTypeChange change) =>
+			$"+{change.AddedFields.Count} field / -{change.RemovedFields.Count} field / " +
+			$"+{change.AddedMethods.Count} method / -{change.RemovedMethods.Count} method";
+
 		void WorkingChangesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
-			compareWorkingChangeButton.IsEnabled = workingChangesGrid.SelectedItem is RepositoryWorkingRow;
+			compareWorkingChangeButton.IsEnabled =
+				workingChangesGrid.SelectedItem is RepositoryWorkingRow row && row.Change is not null;
 
 		void WorkingChangesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) {
-			if (workingChangesGrid.SelectedItem is RepositoryWorkingRow)
+			if (workingChangesGrid.SelectedItem is RepositoryWorkingRow row && row.Change is not null)
 				OpenSelectedWorkingDiff();
 		}
 
@@ -526,6 +545,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		void OpenSelectedWorkingDiff() {
 			if (selectedModule is null ||
 				workingChangesGrid.SelectedItem is not RepositoryWorkingRow row)
+				return;
+			if (row.Change is null)
 				return;
 			MethodDef? target = FindMethod(selectedModule.Module, row.Change.Target);
 			var window = new ILPatchDiffWindow(row.Change, target, decompilerService,
@@ -553,17 +574,29 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (!workingBaseValid || repository is null)
 				return;
 			int staged = workingRows.Count(a => a.IsStaged);
-			workingStatus.Text = workingChangeCount == 0
-				? "Working tree: clean."
-				: $"Working tree: {workingChangeCount} uncommitted method change(s), {staged} staged.";
+			if (workingChangeCount == 0 && workingStructuralSetCount == 0) {
+				workingStatus.Text = "Working tree: clean.";
+				return;
+			}
+			workingStatus.Text =
+				$"Working tree: {workingChangeCount} method body change(s), " +
+				$"{workingStructuralSetCount} type structural change-set(s), {staged}/{workingRows.Count} staged." +
+				(workingStructuralSetCount == 0
+					? string.Empty
+					: " Structural changes are committed atomically; stage all rows to commit this topology change.");
 		}
 
 		void UpdateCommitButton() {
 			int staged = workingRows.Count(a => a.IsStaged);
-			commitButton.Content = $"Commit Staged Changes ({staged})";
+			bool hasStructural = workingRows.Any(a => a.StructuralChange is not null);
+			bool structuralReady = !hasStructural || workingRows.All(a => a.IsStaged);
+			commitButton.Content = hasStructural
+				? $"Commit Structural Change Set ({staged}/{workingRows.Count})"
+				: $"Commit Staged Changes ({staged})";
 			commitButton.IsEnabled = repository is not null &&
 				workingBaseValid &&
 				staged != 0 &&
+				structuralReady &&
 				!string.IsNullOrWhiteSpace(commitMessage.Text);
 			UpdateRestoreButton();
 		}
@@ -585,15 +618,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 				workingChangesGrid.CommitEdit(DataGridEditingUnit.Cell, true);
 				workingChangesGrid.CommitEdit(DataGridEditingUnit.Row, true);
 				var changes = ILPatchWorkspace.Instance.GetEffectiveChanges(selectedModule.Module);
-				if (changes.Count == 0)
-					return;
+				bool hasStructural = workingRows.Any(a => a.StructuralChange is not null);
+				if (hasStructural && workingRows.Any(a => !a.IsStaged))
+					throw new InvalidOperationException(
+						"Structural working changes are atomic in this version. Stage all working rows before committing.");
 				var stagedKeys = new HashSet<string>(
-					workingRows.Where(a => a.IsStaged)
-						.Select(a => a.Change.Target.ToCanonicalString()), StringComparer.Ordinal);
+					workingRows.Where(a => a.IsStaged && a.Change is not null)
+						.Select(a => a.Change!.Target.ToCanonicalString()), StringComparer.Ordinal);
 				var staged = changes
 					.Where(a => stagedKeys.Contains(a.Target.ToCanonicalString()))
 					.ToArray();
-				if (staged.Length == 0)
+				if (staged.Length == 0 && !hasStructural)
 					return;
 				var commit = repository.CommitSelected(selectedModule.Module, changes, staged, message);
 				ILPatchWorkspace.Instance.AcceptChangesAsBaseline(
@@ -624,13 +659,20 @@ namespace dnSpy.AsmEditor.ILPatch {
 			try {
 				using var diskModule = ModuleDefMD.Load(selectedModule.Filename);
 				string diskState = ILPatchModuleStateHasher.Compute(diskModule);
-				string expectedHead = repository.Metadata.HeadCommitId is null
-					? repository.Metadata.RootStateHash
-					: repository.LoadCommit(repository.Metadata.HeadCommitId).StateHash;
-				if (StringComparer.Ordinal.Equals(diskState, expectedHead)) {
+				string diskStructure = ILPatchAssemblyShapeGuard.ComputeFingerprint(diskModule);
+				var headCommit = repository.Metadata.HeadCommitId is null
+					? null
+					: repository.LoadCommit(repository.Metadata.HeadCommitId);
+				string expectedHead = headCommit?.StateHash ?? repository.Metadata.RootStateHash;
+				string expectedHeadStructure = headCommit?.StructureStateHash ?? repository.Metadata.RootStructureStateHash;
+				bool headStructureMatches = string.IsNullOrEmpty(expectedHeadStructure) ||
+					StringComparer.Ordinal.Equals(diskStructure, expectedHeadStructure);
+				bool rootStructureMatches = string.IsNullOrEmpty(repository.Metadata.RootStructureStateHash) ||
+					StringComparer.Ordinal.Equals(diskStructure, repository.Metadata.RootStructureStateHash);
+				if (StringComparer.Ordinal.Equals(diskState, expectedHead) && headStructureMatches) {
 					diskStatus.Text = "Disk working DLL: matches repository HEAD.";
 				}
-				else if (StringComparer.Ordinal.Equals(diskState, repository.Metadata.RootStateHash)) {
+				else if (StringComparer.Ordinal.Equals(diskState, repository.Metadata.RootStateHash) && rootStructureMatches) {
 					diskStatus.Text =
 						"Disk working DLL: still at ROOT while repository HEAD is newer. " +
 						"Before closing dnSpy, use the normal Save Module command if you want the on-disk working DLL to reopen at HEAD.";
@@ -664,7 +706,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 						ShortId = ShortHash(commit.Id),
 						Time = commit.CreatedUtc.ToString("yyyy-MM-dd HH:mm:ss"),
 						Message = commit.Message,
-						ChangeCount = commit.Changes.Count.ToString(),
+						ChangeCount = (commit.Changes.Count + commit.StructuralChanges.Count).ToString(),
 						IsHead = StringComparer.Ordinal.Equals(commit.Id, repository.Metadata.HeadCommitId),
 					});
 				}
@@ -712,6 +754,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 						AfterHash = ShortHash(change.PatchedBody.CanonicalHash),
 					});
 				}
+				foreach (var structural in commit.StructuralChanges) {
+					changeRows.Add(new RepositoryChangeRow {
+						Kind = structural.Kind.ToString(),
+						Method = structural.Member,
+						BeforeHash = "—",
+						AfterHash = "—",
+					});
+				}
 			}
 			catch (Exception ex) {
 				repositoryStatus.Text = "Could not review selected commit: " + ex.Message;
@@ -719,10 +769,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		void CommitChangesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
-			compareCommitChangeButton.IsEnabled = commitChangesGrid.SelectedItem is RepositoryChangeRow;
+			compareCommitChangeButton.IsEnabled =
+				commitChangesGrid.SelectedItem is RepositoryChangeRow row && row.Change is not null;
 
 		void CommitChangesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) {
-			if (commitChangesGrid.SelectedItem is RepositoryChangeRow)
+			if (commitChangesGrid.SelectedItem is RepositoryChangeRow row && row.Change is not null)
 				OpenSelectedCommitDiff();
 		}
 
@@ -732,8 +783,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 		void OpenSelectedCommitDiff() {
 			if (commitChangesGrid.SelectedItem is not RepositoryChangeRow row)
 				return;
+			if (row.Change is null)
+				return;
 			MethodDef? target = selectedModule is null ? null : FindMethod(selectedModule.Module, row.Change.Target);
-			var window = new ILPatchDiffWindow(row.Change, target, decompilerService) { Owner = this };
+			var window = new ILPatchDiffWindow(row.Change, target, decompilerService,
+				textBufferFactoryService, textEditorFactoryService, contentTypeRegistryService) { Owner = this };
 			window.Show();
 		}
 
@@ -766,11 +820,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			try {
 				var restore = repository.CreateRestorePatch(selectedModule.Module, row.CommitId);
-				if (restore.Methods.Count == 0) {
+				if (restore.Methods.Count == 0 && restore.TypeChanges.Count == 0) {
 					MessageBox.Show(this,
 						$"The current in-memory module already matches {targetName}.",
 						"Nothing to restore", MessageBoxButton.OK, MessageBoxImage.Information);
 					return;
+				}
+				if (restore.TypeChanges.Count != 0) {
+					throw new NotSupportedException(
+						$"Restoring this state requires {restore.TypeChanges.Count} type/member structural change-set(s). " +
+						"The repository can store/export/replay these changes headlessly, but dnSpy tree-aware undo for structural restore " +
+						"is not wired into this dialog yet. Export the target commit DLL instead of silently dropping structural changes.");
 				}
 
 				var materializer = new ILPatchBodyMaterializer(selectedModule.Module);
@@ -872,7 +932,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		sealed class RepositoryWorkingRow {
-			public ILPatchMethodChange Change { get; set; } = null!;
+			public ILPatchMethodChange? Change { get; set; }
+			public ILPatchTypeChange? StructuralChange { get; set; }
+			public string Key => Change is not null
+				? "M|" + Change.Target.ToCanonicalString()
+				: "T|" + (StructuralChange?.Target.ToCanonicalString() ?? string.Empty);
 			public bool IsStaged { get; set; }
 			public string Method { get; set; } = string.Empty;
 			public string BaseHash { get; set; } = string.Empty;
@@ -890,7 +954,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		sealed class RepositoryChangeRow {
-			public ILPatchMethodChange Change { get; set; } = null!;
+			public ILPatchMethodChange? Change { get; set; }
 			public string Kind { get; set; } = string.Empty;
 			public string Method { get; set; } = string.Empty;
 			public string BeforeHash { get; set; } = string.Empty;
