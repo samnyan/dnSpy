@@ -50,6 +50,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 				CreatedUtc = DateTime.UtcNow,
 			};
 
+			// Structural records are already semantic definitions. Rebasing existing method
+			// baselines must never silently strip them from a v2 document.
+			document.TypeChanges.AddRange(preview.Document.TypeChanges);
+
 			foreach (var result in preview.Results) {
 				if (TryCreateUpdatedChange(result, out var updated, out string error) && updated is not null) {
 					document.Methods.Add(updated);
