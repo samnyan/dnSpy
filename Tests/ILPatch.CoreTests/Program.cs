@@ -52,6 +52,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(InlineDiffHighlightsSeparatedTokenChanges), InlineDiffHighlightsSeparatedTokenChanges),
 				(nameof(InlineDiffLeavesIdenticalLineUnchanged), InlineDiffLeavesIdenticalLineUnchanged),
 				(nameof(RepositoryCommitHistoryAndExportRoundTrip), RepositoryCommitHistoryAndExportRoundTrip),
+				(nameof(RepositoryStructuralCommitRoundTrip), RepositoryStructuralCommitRoundTrip),
 				(nameof(RepositoryRejectsDivergedWorkingTree), RepositoryRejectsDivergedWorkingTree),
 				(nameof(RepositoryCommitCanRevertParentChange), RepositoryCommitCanRevertParentChange),
 				(nameof(RepositoryCommitDeltaUsesParentState), RepositoryCommitDeltaUsesParentState),
@@ -982,6 +983,64 @@ namespace dnSpy.AsmEditor.ILPatch {
 				VerifyFixtureConstants(rootExport, 1, 10);
 				VerifyFixtureConstants(oldExport, 2, 10);
 				VerifyFixtureConstants(headExport, 2, 20);
+			}
+			finally {
+				if (Directory.Exists(directory))
+					Directory.Delete(directory, true);
+			}
+		}
+
+		static void RepositoryStructuralCommitRoundTrip() {
+			string directory = Path.Combine(Path.GetTempPath(), "ilpatch-repo-structural-" + Guid.NewGuid().ToString("N"));
+			Directory.CreateDirectory(directory);
+			try {
+				string workingPath = Path.Combine(directory, "Assembly-CSharp.dll");
+				CreateRepositoryFixtureModule(1, 10).Write(workingPath);
+				var repository = ILPatchRepository.Initialize(workingPath);
+				Equal(2, repository.Metadata.FormatVersion, "New repositories should use the structure-aware v2 metadata format.");
+				True(!string.IsNullOrEmpty(repository.Metadata.RootStructureStateHash),
+					"v2 repository ROOT should persist a structure-state hash.");
+
+				using (var working = ModuleDefMD.Load(workingPath)) {
+					var type = working.GetTypes().Single(a => StringComparer.Ordinal.Equals(a.FullName, "Tests.RepositoryFixture"));
+					type.Fields.Add(new FieldDefUser("DebugName",
+						new FieldSig(working.CorLibTypes.String), FieldAttributes.Public));
+					AddConstantMethod(type, "Extra", 7);
+
+					var commit = repository.Commit(working, Array.Empty<ILPatchMethodChange>(), "add type members");
+					Equal(0, commit.Changes.Count, "Structural-only commit should not invent existing-method body summaries.");
+					Equal(2, commit.StructuralChanges.Count, "Added field + method should produce two structural summaries.");
+					True(!string.IsNullOrEmpty(commit.StructureStateHash),
+						"Structural commit should persist a structure-state hash.");
+				}
+
+				var stored = repository.LoadCommitPatch(repository.Metadata.HeadCommitId!);
+				Equal(1, stored.TypeChanges.Count, "ROOT-relative repository snapshot should preserve the type change.");
+				Equal(1, stored.TypeChanges[0].AddedFields.Count, "Stored state should preserve the added field.");
+				Equal(1, stored.TypeChanges[0].AddedMethods.Count, "Stored state should preserve the added method.");
+
+				string exportedPath = Path.Combine(directory, "structural-head.dll");
+				repository.Export(repository.Metadata.HeadCommitId, exportedPath);
+				using (var exported = ModuleDefMD.Load(exportedPath)) {
+					var type = exported.GetTypes().Single(a => StringComparer.Ordinal.Equals(a.FullName, "Tests.RepositoryFixture"));
+					True(type.Fields.Any(a => StringComparer.Ordinal.Equals(a.Name?.String, "DebugName")),
+						"Exported structural commit should contain the added field.");
+					var extra = type.Methods.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Extra"));
+					Equal(7L, CilNormalizer.CreateSnapshot(extra).Instructions[0].Operand.IntegerValue,
+						"Exported structural commit should contain the added method body.");
+
+					var restore = repository.CreateRestorePatch(exported, null);
+					Equal(1, restore.TypeChanges.Count, "Restoring to ROOT should encode member removals structurally.");
+					var restoreReport = ILPatchHeadlessApplier.Apply(exported, restore);
+					True(restoreReport.Success, restoreReport.StructuralMessage);
+					False(type.Fields.Any(a => StringComparer.Ordinal.Equals(a.Name?.String, "DebugName")),
+						"ROOT restore should remove the added field.");
+					False(type.Methods.Any(a => StringComparer.Ordinal.Equals(a.Name?.String, "Extra")),
+						"ROOT restore should remove the added method.");
+				}
+
+				var delta = repository.CreateCommitDelta(repository.Metadata.HeadCommitId!);
+				Equal(1, delta.TypeChanges.Count, "Parent-to-commit review should reconstruct structural changes.");
 			}
 			finally {
 				if (Directory.Exists(directory))
