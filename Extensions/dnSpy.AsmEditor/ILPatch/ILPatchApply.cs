@@ -150,7 +150,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 				var moduleNode = documentTreeView.FindNode(plan.Module) ??
 					throw new InvalidOperationException($"Could not find the dnSpy module node for '{plan.Module.Name}'.");
-				foreach (var item in plan.AddedTypes.OrderBy(a => TypeDepth(a.Type))) {
+				foreach (var item in plan.AddedTypes.OrderBy(a => a.Depth)) {
 					TypeNode typeNode;
 					if (item.Parent is null) {
 						var nsCreator = new NamespaceNodeCreator(item.Type.Namespace?.String ?? string.Empty, moduleNode);
@@ -212,7 +212,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			public void ExecuteAdditions() {
 				Plan.AttachAdditions();
 
-				foreach (var item in Plan.AddedTypes.OrderBy(a => TypeDepth(a.Type))) {
+				foreach (var item in Plan.AddedTypes.OrderBy(a => a.Depth)) {
 					var node = addedTypeNodes[item.Type];
 					if (item.Parent is null) {
 						var nsCreator = addedTopLevelNamespaces[item.Type];
@@ -289,7 +289,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					var item = Plan.AddedFields[i];
 					typeNodes[item.Type].TreeNode.Children.Remove(addedFieldNodes[item.Field].TreeNode);
 				}
-				foreach (var item in Plan.AddedTypes.OrderByDescending(a => TypeDepth(a.Type))) {
+				foreach (var item in Plan.AddedTypes.OrderByDescending(a => a.Depth)) {
 					var node = addedTypeNodes[item.Type];
 					if (item.Parent is null) {
 						var nsCreator = addedTopLevelNamespaces[item.Type];
@@ -303,12 +303,6 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Plan.RollbackAdditions();
 			}
 
-			static int TypeDepth(TypeDef type) {
-				int depth = 0;
-				for (var current = type.DeclaringType2; current is not null; current = current.DeclaringType2)
-					depth++;
-				return depth;
-			}
 
 			public IEnumerable<object> ModifiedObjects =>
 				typeNodes.Values.Cast<object>().Concat(removedTypeNodes.Nodes.Cast<object>());

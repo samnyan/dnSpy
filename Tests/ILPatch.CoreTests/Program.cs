@@ -49,6 +49,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(HeadlessApplyReplaysAddedType), HeadlessApplyReplaysAddedType),
 				(nameof(HeadlessApplyReplaysRemovedType), HeadlessApplyReplaysRemovedType),
 				(nameof(HeadlessApplyReplaysNestedType), HeadlessApplyReplaysNestedType),
+				(nameof(StructuralPlanCanReattachReorderedNestedTypes), StructuralPlanCanReattachReorderedNestedTypes),
 				(nameof(HeadlessStructuralConflictRollsBackAdditions), HeadlessStructuralConflictRollsBackAdditions),
 				(nameof(HeadlessWholeTypeAddRejectsExistingType), HeadlessWholeTypeAddRejectsExistingType),
 				(nameof(HeadlessWholeTypeRemoveRejectsChangedType), HeadlessWholeTypeRemoveRejectsChangedType),
@@ -1157,6 +1158,39 @@ namespace dnSpy.AsmEditor.ILPatch {
 				"Nested type method body should survive replay.");
 		}
 
+
+
+		static void StructuralPlanCanReattachReorderedNestedTypes() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var modified = CreateNamedIntMethod("Run", 1);
+			var parent = new TypeDefUser("Tests", "AddedParent", modified.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			modified.Module.Types.Add(parent);
+			var nested = new TypeDefUser(UTF8String.Empty, "Child", modified.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.NestedPublic | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			parent.NestedTypes.Add(nested);
+
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "nested-reattach",
+				out var document, out var report), string.Join(" ", report.UnsupportedReasons));
+			NotNull(document, "Nested reattach fixture should create a structural document.");
+			document!.TypeChanges.Reverse();
+
+			True(ILPatchStructuralMaterializer.TryPrepare(original.Module, document.TypeChanges,
+				out var plan, out string prepareError), prepareError);
+			NotNull(plan, "Nested reattach plan should be created.");
+			plan!.AttachAdditions();
+			plan.RollbackAdditions();
+			plan.AttachAdditions();
+
+			var replayedParent = original.Module.Types.Single(a =>
+				StringComparer.Ordinal.Equals(a.FullName, "Tests.AddedParent"));
+			True(replayedParent.NestedTypes.Any(a => StringComparer.Ordinal.Equals(a.Name?.String, "Child")),
+				"Second AttachAdditions must restore nested ownership even when patch type records are reversed.");
+
+			plan.RollbackAdditions();
+		}
 
 		static void HeadlessStructuralConflictRollsBackAdditions() {
 			var patchBase = CreateNamedIntMethod("Run", 1);

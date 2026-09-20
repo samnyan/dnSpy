@@ -24,7 +24,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 	static class ILPatchStructuralMaterializer {
 		internal sealed class Plan {
 			readonly ModuleDef module;
-			readonly List<(TypeDef? Parent, TypeDef Type)> addedTypes;
+			readonly List<(TypeDef? Parent, TypeDef Type, int Depth)> addedTypes;
 			readonly List<(TypeDef? Parent, TypeDef Type, int Index, int Depth)> removedTypes;
 			readonly List<(TypeDef Type, FieldDef Field)> addedFields;
 			readonly List<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> addedMethods;
@@ -42,7 +42,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				removedFields.Count + removedMethods.Count + removedProperties.Count + removedEvents.Count;
 
 			public ModuleDef Module => module;
-			public IReadOnlyList<(TypeDef? Parent, TypeDef Type)> AddedTypes => addedTypes;
+			public IReadOnlyList<(TypeDef? Parent, TypeDef Type, int Depth)> AddedTypes => addedTypes;
 			public IReadOnlyList<(TypeDef? Parent, TypeDef Type, int Index, int Depth)> RemovedTypes => removedTypes;
 			public IReadOnlyList<(TypeDef Type, FieldDef Field)> AddedFields => addedFields;
 			public IReadOnlyList<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> AddedMethodEntries => addedMethods;
@@ -56,7 +56,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				addedMethods.Select(a => (a.Method, a.Body)).ToArray();
 
 			internal Plan(ModuleDef module,
-				List<(TypeDef? Parent, TypeDef Type)> addedTypes,
+				List<(TypeDef? Parent, TypeDef Type, int Depth)> addedTypes,
 				List<(TypeDef? Parent, TypeDef Type, int Index, int Depth)> removedTypes,
 				List<(TypeDef Type, FieldDef Field)> addedFields,
 				List<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> addedMethods,
@@ -82,7 +82,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			public void AttachAdditions() {
 				if (additionsAttached)
 					return;
-				foreach (var item in addedTypes.OrderBy(a => TypeDepth(a.Type))) {
+				foreach (var item in addedTypes.OrderBy(a => a.Depth)) {
 					if (item.Parent is null)
 						module.Types.Add(item.Type);
 					else {
@@ -112,7 +112,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					addedMethods[i].Type.Methods.Remove(addedMethods[i].Method);
 				for (int i = addedFields.Count - 1; i >= 0; i--)
 					addedFields[i].Type.Fields.Remove(addedFields[i].Field);
-				foreach (var item in addedTypes.OrderByDescending(a => TypeDepth(a.Type))) {
+				foreach (var item in addedTypes.OrderByDescending(a => a.Depth)) {
 					if (item.Parent is null)
 						module.Types.Remove(item.Type);
 					else
@@ -179,7 +179,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			plan = null;
 			error = string.Empty;
-			var addedTypes = new List<(TypeDef? Parent, TypeDef Type)>();
+			var addedTypes = new List<(TypeDef? Parent, TypeDef Type, int Depth)>();
 			var removedTypes = new List<(TypeDef? Parent, TypeDef Type, int Index, int Depth)>();
 			var addedFields = new List<(TypeDef, FieldDef)>();
 			var addedMethods = new List<(TypeDef, MethodDef, ILPatchMethodBodySnapshot?)>();
@@ -221,7 +221,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 						return false;
 					pair.Type.DeclaringType2 = parent;
 				}
-				addedTypes.Add((parent, pair.Type));
+				addedTypes.Add((parent, pair.Type, GetTypeDepth(pair.Type)));
 			}
 
 			var resolver = new TypeSigResolver(module, addedTypeMap.Values.Select(a => (ITypeDefOrRef)a.Type));
