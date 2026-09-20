@@ -109,8 +109,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 		static Dictionary<string, ShapeEntry> Build(ModuleDef module) {
 			var result = new Dictionary<string, ShapeEntry>(StringComparer.Ordinal);
 			void Add(string key, string kind, string target, string value) {
-				if (!result.TryAdd(key, new ShapeEntry(kind, target, value)))
+				if (result.ContainsKey(key))
 					throw new InvalidOperationException($"Assembly shape identity '{key}' is ambiguous.");
+				result.Add(key, new ShapeEntry(kind, target, value));
 			}
 
 			var assembly = module.Assembly;
@@ -159,7 +160,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				var reader = embedded.CreateReader();
 				if (reader.Length > int.MaxValue)
 					throw new InvalidOperationException($"Embedded resource '{resource.Name}' is too large to fingerprint.");
-				return "sha256:" + Hex(SHA256.Create().ComputeHash(reader.ReadBytes((int)reader.Length)));
+				using var sha = SHA256.Create();
+				return "sha256:" + Hex(sha.ComputeHash(reader.ReadBytes((int)reader.Length)));
 			}
 			if (resource is AssemblyLinkedResource assemblyLinked)
 				return "assembly:" + (assemblyLinked.Assembly?.FullName ?? string.Empty);

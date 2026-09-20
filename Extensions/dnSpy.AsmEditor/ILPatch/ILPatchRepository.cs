@@ -78,7 +78,6 @@ namespace dnSpy.AsmEditor.ILPatch {
 						"|body=" + bodyHash);
 				}
 			}
-			lines.Add("shape|" + ILPatchAssemblyShapeGuard.ComputeFingerprint(module));
 			lines.Sort(StringComparer.Ordinal);
 			return Sha256Hex(string.Join("\n", lines));
 		}
