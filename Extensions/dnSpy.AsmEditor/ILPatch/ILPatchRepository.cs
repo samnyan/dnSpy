@@ -34,7 +34,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 	}
 
 	sealed class ILPatchRepositoryCommit {
-		public const int CurrentFormatVersion = 1;
+		public const int CurrentFormatVersion = 2;
+		public const int MinimumSupportedFormatVersion = 1;
 		public int FormatVersion { get; set; } = CurrentFormatVersion;
 		public string Id { get; set; } = string.Empty;
 		public string? ParentId { get; set; }
@@ -42,11 +43,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
 		public string PatchFile { get; set; } = string.Empty;
 		public string StateHash { get; set; } = string.Empty;
+		/// <summary>
+		/// v2 full metadata/member topology fingerprint. Empty on legacy v1 commits.
+		/// StateHash intentionally keeps the v1 method-state algorithm for compatibility.
+		/// </summary>
+		public string StructureStateHash { get; set; } = string.Empty;
 		public List<ILPatchRepositoryMethodSummary> Changes { get; } = new List<ILPatchRepositoryMethodSummary>();
 	}
 
 	sealed class ILPatchRepositoryMetadata {
-		public const int CurrentFormatVersion = 1;
+		public const int CurrentFormatVersion = 2;
+		public const int MinimumSupportedFormatVersion = 1;
 		public int FormatVersion { get; set; } = CurrentFormatVersion;
 		public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
 		public string ModuleFileName { get; set; } = string.Empty;
@@ -54,6 +61,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public Guid RootMvid { get; set; }
 		public string RootFileSha256 { get; set; } = string.Empty;
 		public string RootStateHash { get; set; } = string.Empty;
+		/// <summary>v2 full metadata/member topology fingerprint. Empty on legacy v1 repositories.</summary>
+		public string RootStructureStateHash { get; set; } = string.Empty;
 		public string? HeadCommitId { get; set; }
 	}
 
@@ -144,6 +153,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				RootMvid = module.Mvid ?? Guid.Empty,
 				RootFileSha256 = ILPatchModuleStateHasher.ComputeFileSha256(modulePath),
 				RootStateHash = ILPatchModuleStateHasher.Compute(module),
+				RootStructureStateHash = ILPatchAssemblyShapeGuard.ComputeFingerprint(module),
 			};
 			WriteJsonAtomic(metadataPath, metadata);
 			TryHideRepositoryDirectory(repositoryPath);
@@ -155,8 +165,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 			string directory = Path.GetDirectoryName(modulePath) ?? throw new InvalidOperationException("Module has no parent directory.");
 			string repositoryPath = Path.Combine(directory, DirectoryName);
 			var metadata = ReadJson<ILPatchRepositoryMetadata>(Path.Combine(repositoryPath, MetadataFileName));
-			if (metadata.FormatVersion != ILPatchRepositoryMetadata.CurrentFormatVersion)
-				throw new NotSupportedException($"Unsupported .dnspy repository format {metadata.FormatVersion}.");
+			if (metadata.FormatVersion < ILPatchRepositoryMetadata.MinimumSupportedFormatVersion ||
+				metadata.FormatVersion > ILPatchRepositoryMetadata.CurrentFormatVersion) {
+				throw new NotSupportedException(
+					$"Unsupported .dnspy repository format {metadata.FormatVersion}. " +
+					$"Supported range is {ILPatchRepositoryMetadata.MinimumSupportedFormatVersion}-{ILPatchRepositoryMetadata.CurrentFormatVersion}.");
+			}
 			if (!StringComparer.OrdinalIgnoreCase.Equals(metadata.ModuleFileName, Path.GetFileName(modulePath)))
 				throw new InvalidOperationException(
 					$"The .dnspy repository tracks '{metadata.ModuleFileName}', not '{Path.GetFileName(modulePath)}'.");
@@ -287,6 +301,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				CreatedUtc = commitTime,
 				PatchFile = patchRelativePath,
 				StateHash = ComputeDocumentStateHash(document),
+				StructureStateHash = ComputeDocumentStructureStateHash(document),
 			};
 			PopulateSummary(commit, rootMethods, parentState, fullState);
 
@@ -301,16 +316,34 @@ namespace dnSpy.AsmEditor.ILPatch {
 		}
 
 		string ComputeDocumentStateHash(ILPatchDocument document) {
-			using var module = ModuleDefMD.Load(RootModulePath);
-			var report = ILPatchHeadlessApplier.Apply(module, document);
-			if (!report.Success) {
-				string details = string.Join("; ", report.Entries
-					.Where(a => a.Action == ILPatchHeadlessAction.Unresolved)
-					.Select(a => a.Message));
-				throw new InvalidOperationException(
-					"Could not materialize selected repository state from ROOT: " + details);
-			}
+			using var module = MaterializeDocumentFromRoot(document);
 			return ILPatchModuleStateHasher.Compute(module);
+		}
+
+		string ComputeDocumentStructureStateHash(ILPatchDocument document) {
+			using var module = MaterializeDocumentFromRoot(document);
+			return ILPatchAssemblyShapeGuard.ComputeFingerprint(module);
+		}
+
+		ModuleDefMD MaterializeDocumentFromRoot(ILPatchDocument document) {
+			var module = ModuleDefMD.Load(RootModulePath);
+			try {
+				var report = ILPatchHeadlessApplier.Apply(module, document);
+				if (!report.Success) {
+					string details = string.Join("; ", report.Entries
+						.Where(a => a.Action == ILPatchHeadlessAction.Unresolved)
+						.Select(a => a.Message));
+					if (!string.IsNullOrWhiteSpace(report.StructuralMessage))
+						details = string.IsNullOrEmpty(details) ? report.StructuralMessage : details + "; " + report.StructuralMessage;
+					throw new InvalidOperationException(
+						"Could not materialize selected repository state from ROOT: " + details);
+				}
+				return module;
+			}
+			catch {
+				module.Dispose();
+				throw;
+			}
 		}
 
 		public bool TryValidateWorkingBase(ModuleDef currentModule,
@@ -365,6 +398,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 					throw new InvalidDataException(
 						$"Repository commit {ShortHash(commit.Id)} failed state verification. " +
 						"The stored patch or commit metadata may be corrupted.");
+				}
+				if (!string.IsNullOrEmpty(commit.StructureStateHash)) {
+					string structureState = ILPatchAssemblyShapeGuard.ComputeFingerprint(module);
+					if (!StringComparer.Ordinal.Equals(structureState, commit.StructureStateHash)) {
+						throw new InvalidDataException(
+							$"Repository commit {ShortHash(commit.Id)} failed structure-state verification. " +
+							"The stored patch or commit metadata may be corrupted.");
+					}
 				}
 				return module;
 			}
@@ -438,8 +479,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (string.IsNullOrWhiteSpace(id))
 				throw new ArgumentException("Commit id is empty.", nameof(id));
 			var commit = ReadJson<ILPatchRepositoryCommit>(GetCommitPath(id));
-			if (commit.FormatVersion != ILPatchRepositoryCommit.CurrentFormatVersion)
-				throw new NotSupportedException($"Unsupported repository commit format {commit.FormatVersion}.");
+			if (commit.FormatVersion < ILPatchRepositoryCommit.MinimumSupportedFormatVersion ||
+				commit.FormatVersion > ILPatchRepositoryCommit.CurrentFormatVersion) {
+				throw new NotSupportedException(
+					$"Unsupported repository commit format {commit.FormatVersion}. " +
+					$"Supported range is {ILPatchRepositoryCommit.MinimumSupportedFormatVersion}-{ILPatchRepositoryCommit.CurrentFormatVersion}.");
+			}
 			if (!StringComparer.Ordinal.Equals(commit.Id, id))
 				throw new InvalidDataException($"Commit file '{id}' contains id '{commit.Id}'.");
 			return commit;
@@ -615,6 +660,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 			if (!StringComparer.Ordinal.Equals(stateHash, Metadata.RootStateHash)) {
 				throw new InvalidDataException(
 					"Repository immutable ROOT semantic state does not match repo.json.");
+			}
+			if (!string.IsNullOrEmpty(Metadata.RootStructureStateHash)) {
+				string structureState = ILPatchAssemblyShapeGuard.ComputeFingerprint(module);
+				if (!StringComparer.Ordinal.Equals(structureState, Metadata.RootStructureStateHash)) {
+					throw new InvalidDataException(
+						"Repository immutable ROOT structure state does not match repo.json.");
+				}
 			}
 		}
 
