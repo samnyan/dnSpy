@@ -173,7 +173,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		static string SerializeParams(IList<ParamDef> parameters) =>
 			string.Join(";", parameters
 				.OrderBy(a => a.Sequence)
-				.Select(a => $"{a.Sequence}:{a.Name}:{(ushort)a.Attributes:X4}:{SerializeConstant(a.Constant)}:{SerializeCustomAttributes(a.CustomAttributes)}"));
+				.Select(a => $"{a.Sequence}:{a.Name}:{(ushort)a.Flags:X4}:{SerializeConstant(a.Constant)}:{SerializeCustomAttributes(a.CustomAttributes)}"));
 
 		static string SerializeGenericParameters(IList<GenericParam> parameters) =>
 			string.Join(";", parameters
