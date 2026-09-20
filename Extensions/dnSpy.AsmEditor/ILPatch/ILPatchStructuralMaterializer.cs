@@ -25,20 +25,24 @@ namespace dnSpy.AsmEditor.ILPatch {
 		internal sealed class Plan {
 			readonly List<(TypeDef Type, FieldDef Field)> addedFields;
 			readonly List<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> addedMethods;
-			readonly List<(TypeDef Type, FieldDef Field)> removedFields;
-			readonly List<(TypeDef Type, MethodDef Method)> removedMethods;
+			readonly List<(TypeDef Type, FieldDef Field, int Index)> removedFields;
+			readonly List<(TypeDef Type, MethodDef Method, int Index)> removedMethods;
 			bool additionsAttached;
 
 			public int OperationCount =>
 				addedFields.Count + addedMethods.Count + removedFields.Count + removedMethods.Count;
 
+			public IReadOnlyList<(TypeDef Type, FieldDef Field)> AddedFields => addedFields;
+			public IReadOnlyList<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> AddedMethodEntries => addedMethods;
+			public IReadOnlyList<(TypeDef Type, FieldDef Field, int Index)> RemovedFields => removedFields;
+			public IReadOnlyList<(TypeDef Type, MethodDef Method, int Index)> RemovedMethods => removedMethods;
 			public IReadOnlyList<(MethodDef Method, ILPatchMethodBodySnapshot? Body)> AddedMethods =>
 				addedMethods.Select(a => (a.Method, a.Body)).ToArray();
 
 			internal Plan(List<(TypeDef Type, FieldDef Field)> addedFields,
 				List<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> addedMethods,
-				List<(TypeDef Type, FieldDef Field)> removedFields,
-				List<(TypeDef Type, MethodDef Method)> removedMethods) {
+				List<(TypeDef Type, FieldDef Field, int Index)> removedFields,
+				List<(TypeDef Type, MethodDef Method, int Index)> removedMethods) {
 				this.addedFields = addedFields;
 				this.addedMethods = addedMethods;
 				this.removedFields = removedFields;
@@ -71,6 +75,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 				foreach (var item in removedFields)
 					item.Type.Fields.Remove(item.Field);
 			}
+
+			public void RestoreRemovals() {
+				foreach (var item in removedFields.OrderBy(a => a.Index))
+					item.Type.Fields.Insert(item.Index, item.Field);
+				foreach (var item in removedMethods.OrderBy(a => a.Index))
+					item.Type.Methods.Insert(item.Index, item.Method);
+			}
 		}
 
 		public static bool TryPrepare(ModuleDef module, IReadOnlyList<ILPatchTypeChange> changes,
@@ -84,8 +95,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 			error = string.Empty;
 			var addedFields = new List<(TypeDef, FieldDef)>();
 			var addedMethods = new List<(TypeDef, MethodDef, ILPatchMethodBodySnapshot?)>();
-			var removedFields = new List<(TypeDef, FieldDef)>();
-			var removedMethods = new List<(TypeDef, MethodDef)>();
+			var removedFields = new List<(TypeDef, FieldDef, int)>();
+			var removedMethods = new List<(TypeDef, MethodDef, int)>();
 			var resolver = new TypeSigResolver(module);
 
 			foreach (var change in changes) {
@@ -106,7 +117,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 							: $"Field to remove '{removed}' is ambiguous ({candidates.Length} matches).";
 						return false;
 					}
-					removedFields.Add((type, candidates[0]));
+					removedFields.Add((type, candidates[0], type.Fields.IndexOf(candidates[0])));
 				}
 
 				foreach (var removed in change.RemovedMethods) {
@@ -119,7 +130,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 							: $"Method to remove '{removed}' is ambiguous ({candidates.Length} matches).";
 						return false;
 					}
-					removedMethods.Add((type, candidates[0]));
+					removedMethods.Add((type, candidates[0], type.Methods.IndexOf(candidates[0])));
 				}
 
 				foreach (var added in change.AddedFields) {
