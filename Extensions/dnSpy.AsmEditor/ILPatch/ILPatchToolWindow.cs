@@ -881,10 +881,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 		void ApplyImportedChanges(bool includeExact, bool includeCleanRebase, string failureTitle) {
 			if (importedPreview is null || importedSourceLabel is null || importedDefaultBaseName is null)
 				return;
-			if (importedPreview.Document.TypeChanges.Count != 0) {
+			bool hasStructuralChanges = importedPreview.Document.TypeChanges.Any(a => a.HasEffectiveChange);
+			if (hasStructuralChanges && !includeExact) {
 				MsgBox.Instance.Show(
-					$"This ILPatch contains {importedPreview.Document.TypeChanges.Count} type-level structural change set(s). " +
-					"Automatic structural replay is not enabled in this build yet, so Apply is blocked rather than silently dropping them.");
+					"Structural member replay is atomic and is not a standalone clean-rebase operation. " +
+					"Use Apply Exact or Apply Safe so the structural changes and all compatible method bodies are applied together.");
 				return;
 			}
 
@@ -895,62 +896,105 @@ namespace dnSpy.AsmEditor.ILPatch {
 				var preview = ILPatchImportMatcher.CreatePreview(importedPreview.Document, modules, targetOverrides);
 				ShowImportPreview(importedSourceLabel, importedDefaultBaseName, preview);
 
-				var selectedResults = preview.Results
-					.Where(result =>
-						(includeExact && result.Status == ILPatchImportStatus.Exact) ||
-						(includeCleanRebase &&
-							result.Status == ILPatchImportStatus.BaseChanged &&
-							result.RebasePreview?.Status == ILPatchRebaseStatus.Clean))
-					.ToArray();
-				if (selectedResults.Length == 0)
+				bool IsActionable(ILPatchImportResult result) =>
+					(includeExact && result.Status == ILPatchImportStatus.Exact) ||
+					(includeCleanRebase &&
+						result.Status == ILPatchImportStatus.BaseChanged &&
+						result.RebasePreview?.Status == ILPatchRebaseStatus.Clean);
+				bool IsAlreadySatisfied(ILPatchImportResult result) =>
+					result.Status == ILPatchImportStatus.AlreadyApplied ||
+					result.Status == ILPatchImportStatus.RebasedApplied;
+
+				var selectedResults = preview.Results.Where(IsActionable).ToArray();
+				if (hasStructuralChanges &&
+					preview.Results.Any(result => !IsActionable(result) && !IsAlreadySatisfied(result))) {
+					MsgBox.Instance.Show(
+						"This patch contains type/member structural changes, so replay must be atomic. " +
+						"At least one method-body entry is still unresolved for this Apply mode. " +
+						"Resolve/rebase those entries first; no structural changes were applied.");
+					return;
+				}
+
+				var structuralGroups = ResolveStructuralGroups(preview.Document.TypeChanges, modules);
+				if (selectedResults.Length == 0 && structuralGroups.Count == 0)
 					return;
 
-				var materializers = new Dictionary<ModuleDef, ILPatchBodyMaterializer>();
-				var seenTargets = new HashSet<MethodDef>();
-				var entries = new List<ApplyILPatchCommand.Entry>(selectedResults.Length);
-
-				foreach (var result in selectedResults) {
-					var target = result.Target;
-					if (target is null || target.Module is null)
-						throw new InvalidOperationException($"Patch target '{result.Patch.Target}' is no longer available.");
-					if (!seenTargets.Add(target)) {
+				var preparedStructural = new List<(ModuleDef Module, ILPatchStructuralMaterializer.Plan Plan, Dictionary<MethodDef, CilBody> AddedBodies)>();
+				foreach (var group in structuralGroups) {
+					if (!ILPatchStructuralMaterializer.TryPrepare(group.Key, group.Value,
+						out var plan, out string structuralError) || plan is null) {
 						throw new InvalidOperationException(
-							$"Multiple selected patch entries resolve to '{ILPatchMethodIdentity.Create(target)}'. " +
-							"Nothing was applied; resolve the target collision or apply the files sequentially.");
+							$"Could not prepare structural replay for module '{group.Key.Name}': {structuralError}");
 					}
+					preparedStructural.Add((group.Key, plan, new Dictionary<MethodDef, CilBody>()));
+				}
 
-					ILPatchMethodBodySnapshot bodySnapshot;
-					if (result.Status == ILPatchImportStatus.Exact) {
-						bodySnapshot = result.Patch.PatchedBody;
-					}
-					else {
-						var rebase = result.RebasePreview;
-						if (rebase is null)
-							throw new InvalidOperationException($"Clean rebase analysis for '{result.Patch.Target}' is no longer available.");
-						if (!ILPatchRebaseMerger.TryCreateMergedSnapshot(result.Patch, rebase,
-							out var mergedSnapshot, out string mergeError) || mergedSnapshot is null) {
-							MsgBox.Instance.Show(
-								$"Cannot rebase '{result.Patch.Target}'.\n\n{mergeError}\n\nNo methods were modified.");
-							return;
+				// New members must temporarily exist in dnlib while bodies are materialized, because
+				// existing/new methods can reference those exact new FieldDef/MethodDef objects.
+				foreach (var prepared in preparedStructural)
+					prepared.Plan.AttachAdditions();
+
+				var entries = new List<ApplyILPatchCommand.Entry>(selectedResults.Length);
+				try {
+					var materializers = new Dictionary<ModuleDef, ILPatchBodyMaterializer>();
+					var seenTargets = new HashSet<MethodDef>();
+
+					foreach (var result in selectedResults) {
+						var target = result.Target;
+						if (target is null || target.Module is null)
+							throw new InvalidOperationException($"Patch target '{result.Patch.Target}' is no longer available.");
+						if (!seenTargets.Add(target)) {
+							throw new InvalidOperationException(
+								$"Multiple selected patch entries resolve to '{ILPatchMethodIdentity.Create(target)}'. " +
+								"Nothing was applied; resolve the target collision or apply the files sequentially.");
 						}
-						bodySnapshot = mergedSnapshot;
+
+						ILPatchMethodBodySnapshot bodySnapshot;
+						if (result.Status == ILPatchImportStatus.Exact) {
+							bodySnapshot = result.Patch.PatchedBody;
+						}
+						else {
+							var rebase = result.RebasePreview;
+							if (rebase is null)
+								throw new InvalidOperationException($"Clean rebase analysis for '{result.Patch.Target}' is no longer available.");
+							if (!ILPatchRebaseMerger.TryCreateMergedSnapshot(result.Patch, rebase,
+								out var mergedSnapshot, out string mergeError) || mergedSnapshot is null) {
+								throw new InvalidOperationException(
+									$"Cannot rebase '{result.Patch.Target}': {mergeError}");
+							}
+							bodySnapshot = mergedSnapshot;
+						}
+
+						var methodNode = appService.DocumentTreeView.FindNode(target) as MethodNode ??
+							throw new InvalidOperationException($"Could not find the dnSpy document tree node for '{result.Patch.Target}'.");
+						if (!materializers.TryGetValue(target.Module, out var materializer))
+							materializers.Add(target.Module, materializer = new ILPatchBodyMaterializer(target.Module));
+						if (!materializer.TryCreate(target, bodySnapshot, out var newBody, out string bodyError) ||
+							newBody is null) {
+							throw new InvalidOperationException(
+								$"Cannot materialize '{result.Patch.Target}': {bodyError}");
+						}
+						entries.Add(new ApplyILPatchCommand.Entry(methodNode, newBody));
 					}
 
-					var methodNode = appService.DocumentTreeView.FindNode(target) as MethodNode;
-					if (methodNode is null)
-						throw new InvalidOperationException($"Could not find the dnSpy document tree node for '{result.Patch.Target}'.");
-
-					if (!materializers.TryGetValue(target.Module, out var materializer))
-						materializers.Add(target.Module, materializer = new ILPatchBodyMaterializer(target.Module));
-
-					if (!materializer.TryCreate(target, bodySnapshot, out var newBody, out string bodyError) ||
-						newBody is null) {
-						MsgBox.Instance.Show(
-							$"Cannot materialize '{result.Patch.Target}'.\n\n{bodyError}\n\nNo methods were modified.");
-						return;
+					foreach (var prepared in preparedStructural) {
+						if (!materializers.TryGetValue(prepared.Module, out var materializer))
+							materializers.Add(prepared.Module, materializer = new ILPatchBodyMaterializer(prepared.Module));
+						foreach (var added in prepared.Plan.AddedMethods) {
+							if (added.Body is null)
+								continue;
+							if (!materializer.TryCreate(added.Method, added.Body, out var body, out string bodyError) ||
+								body is null) {
+								throw new InvalidOperationException(
+									$"Cannot materialize added method '{ILPatchMethodIdentity.Create(added.Method)}': {bodyError}");
+							}
+							prepared.AddedBodies.Add(added.Method, body);
+						}
 					}
-
-					entries.Add(new ApplyILPatchCommand.Entry(methodNode, newBody));
+				}
+				finally {
+					for (int i = preparedStructural.Count - 1; i >= 0; i--)
+						preparedStructural[i].Plan.RollbackAdditions();
 				}
 
 				string baseName = string.IsNullOrWhiteSpace(preview.Document.Name) ? "IL patch" : preview.Document.Name;
@@ -960,14 +1004,46 @@ namespace dnSpy.AsmEditor.ILPatch {
 						? baseName + " (clean rebase)"
 						: baseName;
 
-				// Every selected result has been merged/materialized above. Only now mutate, as one
-				// dnSpy undo command, so Exact + Clean-Rebase batches remain atomic.
-				undoCommandService.Add(new ApplyILPatchCommand(methodAnnotations, entries, commandName));
+				if (preparedStructural.Count == 0) {
+					undoCommandService.Add(new ApplyILPatchCommand(methodAnnotations, entries, commandName));
+				}
+				else {
+					undoCommandService.Add(new ApplyILPatchDocumentCommand(
+						methodAnnotations,
+						appService.DocumentTreeView,
+						entries,
+						preparedStructural.Select(a =>
+							(a.Plan, (IReadOnlyDictionary<MethodDef, CilBody>)a.AddedBodies)),
+						commandName));
+				}
 				RefreshImportedPreview();
 			}
 			catch (Exception ex) {
-				MsgBox.Instance.Show(ex, failureTitle + " No methods were modified.");
+				MsgBox.Instance.Show(ex, failureTitle + " Nothing was modified.");
 			}
+		}
+
+		static Dictionary<ModuleDef, List<ILPatchTypeChange>> ResolveStructuralGroups(
+			IReadOnlyList<ILPatchTypeChange> changes, IReadOnlyList<ModuleDef> modules) {
+			var result = new Dictionary<ModuleDef, List<ILPatchTypeChange>>();
+			foreach (var change in changes.Where(a => a.HasEffectiveChange)) {
+				var candidates = modules.Where(module =>
+					(string.IsNullOrEmpty(change.Target.ModuleName) ||
+						StringComparer.Ordinal.Equals(module.Name?.String ?? string.Empty, change.Target.ModuleName)) &&
+					(string.IsNullOrEmpty(change.Target.AssemblyName) ||
+						StringComparer.Ordinal.Equals(module.Assembly?.Name?.String ?? string.Empty, change.Target.AssemblyName)) &&
+					module.GetTypes().Any(type => StringComparer.Ordinal.Equals(type.FullName, change.Target.FullName)))
+					.ToArray();
+				if (candidates.Length != 1) {
+					throw new InvalidOperationException(candidates.Length == 0
+						? $"Could not find loaded target type '{change.Target.FullName}' for structural replay."
+						: $"Structural target type '{change.Target.FullName}' is ambiguous across {candidates.Length} loaded modules.");
+				}
+				if (!result.TryGetValue(candidates[0], out var list))
+					result.Add(candidates[0], list = new List<ILPatchTypeChange>());
+				list.Add(change);
+			}
+			return result;
 		}
 
 		void ExportRebasedButton_Click(object sender, RoutedEventArgs e) {
