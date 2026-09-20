@@ -49,6 +49,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(HeadlessApplyReplaysAddedType), HeadlessApplyReplaysAddedType),
 				(nameof(HeadlessApplyReplaysRemovedType), HeadlessApplyReplaysRemovedType),
 				(nameof(HeadlessApplyReplaysNestedType), HeadlessApplyReplaysNestedType),
+				(nameof(HeadlessStructuralConflictRollsBackAdditions), HeadlessStructuralConflictRollsBackAdditions),
+				(nameof(HeadlessWholeTypeAddRejectsExistingType), HeadlessWholeTypeAddRejectsExistingType),
 				(nameof(SerializerReadsLegacyV1Document), SerializerReadsLegacyV1Document),
 				(nameof(DocumentCreatorRejectsMethodFlagChange), DocumentCreatorRejectsMethodFlagChange),
 				(nameof(DocumentCreatorDiskRoundTripCapturesBodyChange), DocumentCreatorDiskRoundTripCapturesBodyChange),
@@ -1123,6 +1125,55 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var replayed = replayedParent.NestedTypes.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "NestedAdded"));
 			Equal(55L, CilNormalizer.CreateSnapshot(replayed.Methods.Single(a => StringComparer.Ordinal.Equals(a.Name?.String, "Value"))).Instructions[0].Operand.IntegerValue,
 				"Nested type method body should survive replay.");
+		}
+
+
+		static void HeadlessStructuralConflictRollsBackAdditions() {
+			var patchBase = CreateNamedIntMethod("Run", 1);
+			var patchModified = CreateNamedIntMethod("Run", 2);
+			var addedType = new TypeDefUser("Tests", "AtomicAdded", patchModified.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			patchModified.Module.Types.Add(addedType);
+			AddConstantMethod(addedType, "Value", 5);
+
+			True(ILPatchDocumentCreator.TryCreate(patchBase.Module, patchModified.Module, "atomic-structural",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Atomic structural patch should be created.");
+
+			var current = CreateNamedIntMethod("Run", 3);
+			var before = CilNormalizer.CreateSnapshot(current);
+			before.CanonicalHash = ILPatchBodyHasher.Compute(before);
+			var report = ILPatchHeadlessApplier.Apply(current.Module, document!);
+			False(report.Success, "Conflicting existing method must fail the mixed structural patch.");
+			False(current.Module.GetTypes().Any(a => StringComparer.Ordinal.Equals(a.FullName, "Tests.AtomicAdded")),
+				"Failed mixed preflight must roll back temporarily attached added types.");
+			var after = CilNormalizer.CreateSnapshot(current);
+			after.CanonicalHash = ILPatchBodyHasher.Compute(after);
+			Equal(before.CanonicalHash, after.CanonicalHash,
+				"Failed mixed preflight must not mutate existing method bodies.");
+		}
+
+		static void HeadlessWholeTypeAddRejectsExistingType() {
+			var original = CreateNamedIntMethod("Run", 1);
+			var modified = CreateNamedIntMethod("Run", 1);
+			var added = new TypeDefUser("Tests", "DuplicateType", modified.Module.CorLibTypes.Object.TypeDefOrRef) {
+				Attributes = TypeAttributes.Public | TypeAttributes.AutoLayout | TypeAttributes.Class,
+			};
+			modified.Module.Types.Add(added);
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "duplicate-type",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Whole-type add patch should be created.");
+
+			var current = CreateNamedIntMethod("Run", 1);
+			current.Module.Types.Add(new TypeDefUser("Tests", "DuplicateType", current.Module.CorLibTypes.Object.TypeDefOrRef));
+			int typeCountBefore = current.Module.Types.Count;
+			var report = ILPatchHeadlessApplier.Apply(current.Module, document!);
+			False(report.Success, "Whole-type add must fail closed if that type already exists.");
+			Equal(typeCountBefore, current.Module.Types.Count,
+				"Rejected whole-type add must not create a duplicate TypeDef.");
+			True(report.StructuralMessage.Contains("already exists", StringComparison.Ordinal),
+				"Failure should explain the duplicate type.");
 		}
 
 		static void SerializerReadsLegacyV1Document() {

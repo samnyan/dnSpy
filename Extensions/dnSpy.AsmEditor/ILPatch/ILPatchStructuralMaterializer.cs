@@ -192,6 +192,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			var addedTypeMap = new Dictionary<string, (ILPatchTypeDefinitionSnapshot Definition, TypeDef Type)>(StringComparer.Ordinal);
 			foreach (var change in changes.Where(a => a.Kind == ILPatchTypeChangeKind.Add)) {
+				if (module.GetTypes().Any(type =>
+					StringComparer.Ordinal.Equals(type.FullName, change.Target.FullName))) {
+					error = $"Type to add '{change.Target.FullName}' already exists in target module '{module.Name}'.";
+					return false;
+				}
 				if (change.TypeDefinition is null) {
 					error = $"Added type '{change.Target}' is missing its type definition snapshot.";
 					return false;
