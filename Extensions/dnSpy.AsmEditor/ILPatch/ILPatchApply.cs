@@ -94,8 +94,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 			readonly Dictionary<TypeDef, TypeNode> typeNodes = new Dictionary<TypeDef, TypeNode>();
 			readonly Dictionary<FieldDef, FieldNode> addedFieldNodes = new Dictionary<FieldDef, FieldNode>();
 			readonly Dictionary<MethodDef, MethodNode> addedMethodNodes = new Dictionary<MethodDef, MethodNode>();
+			readonly Dictionary<PropertyDef, PropertyNode> addedPropertyNodes = new Dictionary<PropertyDef, PropertyNode>();
+			readonly Dictionary<EventDef, EventNode> addedEventNodes = new Dictionary<EventDef, EventNode>();
+			readonly HashSet<MethodDef> addedAccessorMethods = new HashSet<MethodDef>();
+			readonly HashSet<MethodDef> removedAccessorMethods = new HashSet<MethodDef>();
 			DeletableNodes<FieldNode> removedFieldNodes;
 			DeletableNodes<MethodNode> removedMethodNodes;
+			DeletableNodes<PropertyNode> removedPropertyNodes;
+			DeletableNodes<EventNode> removedEventNodes;
 			bool addedNodesCreated;
 
 			public ILPatchStructuralMaterializer.Plan Plan { get; }
@@ -108,10 +114,44 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Plan = plan ?? throw new ArgumentNullException(nameof(plan));
 				AddedMethodBodies = addedMethodBodies ?? throw new ArgumentNullException(nameof(addedMethodBodies));
 
+				foreach (var property in plan.AddedProperties) {
+					foreach (var method in property.Property.GetMethods.Concat(property.Property.SetMethods).Concat(property.Property.OtherMethods))
+						addedAccessorMethods.Add(method);
+				}
+				foreach (var @event in plan.AddedEvents) {
+					if (@event.Event.AddMethod is not null) addedAccessorMethods.Add(@event.Event.AddMethod);
+					if (@event.Event.InvokeMethod is not null) addedAccessorMethods.Add(@event.Event.InvokeMethod);
+					if (@event.Event.RemoveMethod is not null) addedAccessorMethods.Add(@event.Event.RemoveMethod);
+					foreach (var method in @event.Event.OtherMethods) addedAccessorMethods.Add(method);
+				}
+				foreach (var property in plan.RemovedProperties) {
+					foreach (var method in property.Property.GetMethods.Concat(property.Property.SetMethods).Concat(property.Property.OtherMethods))
+						removedAccessorMethods.Add(method);
+				}
+				foreach (var @event in plan.RemovedEvents) {
+					if (@event.Event.AddMethod is not null) removedAccessorMethods.Add(@event.Event.AddMethod);
+					if (@event.Event.InvokeMethod is not null) removedAccessorMethods.Add(@event.Event.InvokeMethod);
+					if (@event.Event.RemoveMethod is not null) removedAccessorMethods.Add(@event.Event.RemoveMethod);
+					foreach (var method in @event.Event.OtherMethods) removedAccessorMethods.Add(method);
+				}
+
+				var addedMethodSet = new HashSet<MethodDef>(plan.AddedMethodEntries.Select(a => a.Method));
+				if (addedAccessorMethods.Any(a => !addedMethodSet.Contains(a)))
+					throw new NotSupportedException(
+						"GUI structural replay currently requires every accessor of an added property/event to be added in the same patch.");
+				var removedMethodSet = new HashSet<MethodDef>(plan.RemovedMethods.Select(a => a.Method));
+				if (removedAccessorMethods.Any(a => !removedMethodSet.Contains(a)))
+					throw new NotSupportedException(
+						"GUI structural replay currently requires every accessor of a removed property/event to be removed in the same patch.");
+
 				foreach (var type in plan.AddedFields.Select(a => a.Type)
 					.Concat(plan.AddedMethodEntries.Select(a => a.Type))
+					.Concat(plan.AddedProperties.Select(a => a.Type))
+					.Concat(plan.AddedEvents.Select(a => a.Type))
 					.Concat(plan.RemovedFields.Select(a => a.Type))
 					.Concat(plan.RemovedMethods.Select(a => a.Type))
+					.Concat(plan.RemovedProperties.Select(a => a.Type))
+					.Concat(plan.RemovedEvents.Select(a => a.Type))
 					.Distinct()) {
 					var typeNode = documentTreeView.FindNode(type) as TypeNode ??
 						throw new InvalidOperationException($"Could not find the dnSpy type node for '{type.FullName}'.");
@@ -122,11 +162,20 @@ namespace dnSpy.AsmEditor.ILPatch {
 				var removedFields = plan.RemovedFields.Select(a =>
 					documentTreeView.FindNode(a.Field) as FieldNode ??
 					throw new InvalidOperationException($"Could not find the dnSpy field node for '{a.Field.FullName}'.")).ToArray();
-				var removedMethods = plan.RemovedMethods.Select(a =>
-					documentTreeView.FindNode(a.Method) as MethodNode ??
-					throw new InvalidOperationException($"Could not find the dnSpy method node for '{a.Method.FullName}'.")).ToArray();
+				var removedMethods = plan.RemovedMethods
+					.Where(a => !removedAccessorMethods.Contains(a.Method))
+					.Select(a => documentTreeView.FindNode(a.Method) as MethodNode ??
+						throw new InvalidOperationException($"Could not find the dnSpy method node for '{a.Method.FullName}'.")).ToArray();
+				var removedProperties = plan.RemovedProperties.Select(a =>
+					documentTreeView.FindNode(a.Property) as PropertyNode ??
+					throw new InvalidOperationException($"Could not find the dnSpy property node for '{a.Property.FullName}'.")).ToArray();
+				var removedEvents = plan.RemovedEvents.Select(a =>
+					documentTreeView.FindNode(a.Event) as EventNode ??
+					throw new InvalidOperationException($"Could not find the dnSpy event node for '{a.Event.FullName}'.")).ToArray();
 				removedFieldNodes = new DeletableNodes<FieldNode>(removedFields);
 				removedMethodNodes = new DeletableNodes<MethodNode>(removedMethods);
+				removedPropertyNodes = new DeletableNodes<PropertyNode>(removedProperties);
+				removedEventNodes = new DeletableNodes<EventNode>(removedEvents);
 			}
 
 			public void ExecuteAdditions() {
@@ -135,8 +184,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 				if (!addedNodesCreated) {
 					foreach (var item in Plan.AddedFields)
 						addedFieldNodes.Add(item.Field, typeNodes[item.Type].Create(item.Field));
-					foreach (var item in Plan.AddedMethodEntries)
+					foreach (var item in Plan.AddedMethodEntries.Where(a => !addedAccessorMethods.Contains(a.Method)))
 						addedMethodNodes.Add(item.Method, typeNodes[item.Type].Create(item.Method));
+					foreach (var item in Plan.AddedProperties)
+						addedPropertyNodes.Add(item.Property, typeNodes[item.Type].Create(item.Property));
+					foreach (var item in Plan.AddedEvents)
+						addedEventNodes.Add(item.Event, typeNodes[item.Type].Create(item.Event));
 					addedNodesCreated = true;
 				}
 
@@ -145,11 +198,18 @@ namespace dnSpy.AsmEditor.ILPatch {
 				foreach (var item in Plan.AddedMethodEntries) {
 					if (AddedMethodBodies.TryGetValue(item.Method, out var body))
 						item.Method.MethodBody = body;
-					typeNodes[item.Type].TreeNode.AddChild(addedMethodNodes[item.Method].TreeNode);
+					if (!addedAccessorMethods.Contains(item.Method))
+						typeNodes[item.Type].TreeNode.AddChild(addedMethodNodes[item.Method].TreeNode);
 				}
+				foreach (var item in Plan.AddedProperties)
+					typeNodes[item.Type].TreeNode.AddChild(addedPropertyNodes[item.Property].TreeNode);
+				foreach (var item in Plan.AddedEvents)
+					typeNodes[item.Type].TreeNode.AddChild(addedEventNodes[item.Event].TreeNode);
 			}
 
 			public void ExecuteRemovals() {
+				removedPropertyNodes.Delete();
+				removedEventNodes.Delete();
 				removedMethodNodes.Delete();
 				removedFieldNodes.Delete();
 				Plan.CommitRemovals();
@@ -159,12 +219,23 @@ namespace dnSpy.AsmEditor.ILPatch {
 				Plan.RestoreRemovals();
 				removedFieldNodes.Restore();
 				removedMethodNodes.Restore();
+				removedEventNodes.Restore();
+				removedPropertyNodes.Restore();
 			}
 
 			public void UndoAdditions() {
+				for (int i = Plan.AddedEvents.Count - 1; i >= 0; i--) {
+					var item = Plan.AddedEvents[i];
+					typeNodes[item.Type].TreeNode.Children.Remove(addedEventNodes[item.Event].TreeNode);
+				}
+				for (int i = Plan.AddedProperties.Count - 1; i >= 0; i--) {
+					var item = Plan.AddedProperties[i];
+					typeNodes[item.Type].TreeNode.Children.Remove(addedPropertyNodes[item.Property].TreeNode);
+				}
 				for (int i = Plan.AddedMethodEntries.Count - 1; i >= 0; i--) {
 					var item = Plan.AddedMethodEntries[i];
-					typeNodes[item.Type].TreeNode.Children.Remove(addedMethodNodes[item.Method].TreeNode);
+					if (!addedAccessorMethods.Contains(item.Method))
+						typeNodes[item.Type].TreeNode.Children.Remove(addedMethodNodes[item.Method].TreeNode);
 				}
 				for (int i = Plan.AddedFields.Count - 1; i >= 0; i--) {
 					var item = Plan.AddedFields[i];
