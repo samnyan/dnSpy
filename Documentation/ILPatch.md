@@ -51,9 +51,9 @@ original -> edit 3
 
 Undoing back to the original body therefore makes the effective patch disappear without deleting the audit history.
 
-### Store both sides of a patch
+### Store both sides of a method patch
 
-`.ilpatch` v1 stores both the normalized baseline body and the patched body. This is intentionally redundant. It enables a future three-way merge:
+`.ilpatch` v1/v2 method entries store both the normalized baseline body and the patched body. This is intentionally redundant. It enables a future three-way merge:
 
 ```
 base (old original)
@@ -101,6 +101,22 @@ Future fuzzy matching must fail closed. If multiple target methods score similar
 - normalized exception handlers
 - deterministic SHA-256 canonical hash
 
+## v2 structural change model
+
+Format v2 keeps the v1 method-body representation intact and adds type-scoped structural change sets. v1 documents remain readable.
+
+`ILPatchTypeChange` is the structural unit. For an existing type (`Kind = Modify`) it can record:
+
+- added / removed fields;
+- added / removed methods, including CIL bodies;
+- added / removed properties and their getter/setter/other-method relationships;
+- added / removed events and their add/remove/invoke/other-method relationships.
+
+Whole types are represented with `Kind = Add` or `Kind = Remove`. A whole-type snapshot contains its identity, namespace/name, attributes, base type, optional declaring type for nested classes, and all replayable fields/methods/properties/events. Nested type changes are emitted as their own type changes and retain their parent identity.
+
+Structural replay is semantic rather than token-based. New `TypeDef`, `FieldDef`, `MethodDef`, `PropertyDef` and `EventDef` objects are created first, references/accessors are rebound to those objects, method bodies are then materialized, and removals are committed last. GUI application updates both the dnlib model and Assembly Explorer tree as one `IUndoCommand`, so one Ctrl+Z restores the complete mixed method/structure batch.
+
+The structural subset intentionally fails closed when metadata cannot yet be round-tripped. Important current exclusions include custom attributes, generic type/method parameter definitions and constraints, type interface lists, explicit class layout/declarative security, field constants/marshal/RVA metadata, P/Invoke/override/security method metadata, property constants/`ExplicitThis`, and event custom attributes. Existing type/member metadata mutations are also not silently rewritten merely because add/remove support exists.
 ## Integration with dnSpy undo/redo
 
 The assembly editor already routes edits through `IUndoCommandService`, so ILPatch integrates with those existing editing paths instead of polling every loaded module.
@@ -110,20 +126,21 @@ The current implementation captures a method's body before its first mutation:
 - compiler-based C# / VB edits identify the methods affected by the importer;
 - raw IL editing and Replace Body With Stub call `ILPatchWorkspace.EnsureTracked()` through `MethodBodyOptions.CopyTo()`.
 
-An auto-loaded workspace listener observes Add / Undo / Redo events and refreshes only methods that are already tracked. It also subscribes to `IDsDocumentService.CollectionChanged`; when a document is removed or the document list is cleared, tracking, pending mutations and edit-history rows belonging to those `ModuleDef` instances are removed automatically. Imported Exact patches are also applied as one `IUndoCommand`, so one Ctrl+Z reverts the whole imported batch.
+An auto-loaded workspace listener observes Add / Undo / Redo events and refreshes only methods that are already tracked. It also subscribes to `IDsDocumentService.CollectionChanged`; when a document is removed or the document list is cleared, tracking, pending mutations and edit-history rows belonging to those `ModuleDef` instances are removed automatically. Imported Exact/Clean-Rebase and v2 structural patches are also applied as one `IUndoCommand`, so one Ctrl+Z reverts the whole imported batch, including Assembly Explorer member/type nodes.
 
 This keeps normal tracking O(number of edited methods), avoids retaining closed assemblies in the singleton workspace, and preserves dnSpy's existing save flow and undo semantics.
 
 ## Exact import safety
 
-Import currently has a deliberately conservative exact-only path:
+Import uses a deliberately conservative fail-closed path:
 
 1. Match a method by stable assembly/module/type/name/signature identity.
 2. Compare the current normalized body hash with the patch baseline.
 3. Report `Exact`, `AlreadyApplied`, `RebasedApplied`, `BaseChanged`, `Missing`, `Ambiguous`, or `Incompatible`.
 4. Re-run the preview immediately before Apply so a stale UI state cannot authorize a mutation.
 5. Materialize every Exact patched body before changing any method.
-6. Apply all successfully preflighted Exact entries as one dnSpy undo command.
+6. For v2 structural patches, preflight all type/member operations and every related method body before mutation; structural replay is atomic.
+7. Apply the successfully preflighted mixed batch as one dnSpy undo command.
 
 MVID is displayed/provided as source provenance but never used as the primary locator.
 
@@ -196,7 +213,7 @@ The immutable `base/` DLL is the repository ROOT. Each commit stores a full **RO
 
 Before a commit is accepted, repository mode validates that the current working baseline is actually based on HEAD. Methods already changed in HEAD must appear with the HEAD patched hash; untouched methods must also match HEAD. Opening an older/root DLL and accidentally committing on top of it therefore fails closed instead of silently rewriting history.
 
-The repository scope is existing managed CIL method bodies. Structural method changes remain outside v1 and cause commit validation to fail.
+Repository format v2 keeps legacy method-state hashes for backward compatibility and adds a full structure-state fingerprint. Repositories can commit/review/export replayable v2 field/method/property/event/type topology changes. Structural working changes are currently staged atomically with all method-body edits in that working tree, rather than allowing a half-staged class topology.
 
 For history review, stored ROOT-to-commit snapshots are converted on demand into a **parent -> selected commit** semantic delta. This lets the same side-by-side diff viewer show what one commit actually changed without weakening the independent-export property of stored commits.
 
@@ -224,9 +241,9 @@ A successful repository commit accepts only that module's current tracked state 
 
 **Restore Selected to Working Tree** is the safe historical-checkout operation. It materializes the selected commit/ROOT, computes a current-working-tree → selected-state semantic patch, preflights every changed method, then applies the whole restore as one dnSpy undo command. Repository HEAD is not moved and the disk DLL is not written automatically. Any pre-existing uncommitted working changes are replaced, but Ctrl+Z restores them. After restore, all resulting working changes are intentionally unstaged; review/stage them and commit if you want the historical state to become a new linear commit.
 
-Restore is enabled only when the loaded working tree is already based on repository HEAD. If the loaded DLL is an older/root/diverged state, first export/open HEAD (or otherwise synchronize the loaded module to HEAD). This keeps the workspace baseline, undo behavior and subsequent commit parent unambiguous. Repository format v1 therefore avoids detached-HEAD/branch semantics while still making arbitrary historical states editable.
+Restore is enabled only when the loaded working tree is already based on repository HEAD. If the loaded DLL is an older/root/diverged state, first export/open HEAD (or otherwise synchronize the loaded module to HEAD). This keeps the workspace baseline, undo behavior and subsequent commit parent unambiguous. Repository format v2 still avoids detached-HEAD/branch semantics while making arbitrary historical states editable. Legacy v1 repositories remain readable.
 
-Repository commits support **method-level staging**. The Working Changes table has a Stage checkbox plus **Stage All / Unstage All** controls. A commit validates the complete working tree against HEAD but advances HEAD using only staged method changes; unstaged methods remain in the in-memory working tree and can be committed later. The commit state hash is materialized from immutable ROOT plus the newly selected full-state patch, rather than hashing the current in-memory module (which may still contain unstaged edits). After commit, only staged methods are accepted as new Workspace baselines. Their tracking entries remain alive with the committed body as the new baseline, so a later dnSpy Undo/Redo or further edit immediately becomes a new working-tree change relative to HEAD. This is intentionally method-level staging for now; hunk-level staging inside one CIL method is a separate future feature.
+Repository commits support **method-level staging** when the working tree contains method-body edits only. The Working Changes table has a Stage checkbox plus **Stage All / Unstage All** controls. A commit validates the complete working tree against HEAD but advances HEAD using only staged method changes; unstaged methods remain in the in-memory working tree and can be committed later. The commit state hash is materialized from immutable ROOT plus the newly selected full-state patch, rather than hashing the current in-memory module (which may still contain unstaged edits). After commit, only staged methods are accepted as new Workspace baselines. Their tracking entries remain alive with the committed body as the new baseline, so a later dnSpy Undo/Redo or further edit immediately becomes a new working-tree change relative to HEAD. When structural type/member changes are present, the current implementation requires the complete structural working state (and all method-body rows) to be staged together so a commit cannot contain half of a class topology. Hunk-level staging inside one CIL method remains a separate future feature.
 
 Repository mode also distinguishes the in-memory working tree from the DLL currently on disk. The window reports whether the disk file matches HEAD, is still at ROOT/behind HEAD, or differs from both. After committing in-memory edits, use dnSpy's normal **Save Module** before closing if you want the next session to reopen directly on HEAD; repository commits themselves never silently overwrite the working DLL.
 
@@ -251,7 +268,7 @@ The Patch Workspace is split conceptually into two workflows:
 
 1. **Create a patch from edits** — load the original assembly, edit CIL using dnSpy as usual, review the tracked normalized IL changes in the upper grid, then choose **Export .ilpatch...**. **Revert Selected** restores one tracked method to the captured pre-edit baseline through dnSpy undo/redo.
    For long-running projects, choose **Change Repository...** instead of repeatedly saving ad-hoc DLL copies: initialize once, commit each completed feature/fix, then review or export any historical commit later.
-   If you already have an old original DLL and a separately saved dnSpy-modified DLL, choose **Recover from DLL Pair...** instead. The recovery path compares normalized existing CIL method bodies and writes a regular v1 `.ilpatch`; unsupported structural changes such as added/removed/renamed methods or metadata flag changes abort recovery instead of being silently omitted.
+   If you already have an old original DLL and a separately saved dnSpy-modified DLL, choose **Recover from DLL Pair...** instead. The recovery path writes a v2 `.ilpatch` when it finds replayable structural changes and groups them by declaring type. Unsupported metadata changes still abort recovery instead of being silently omitted.
 2. **Replay a patch** — load the target/newer assembly, choose **Import .ilpatch...**, inspect each result and its normalized IL diff, resolve renamed/moved methods with **Use Candidate** only when appropriate, then use **Apply Safe**. If you load/replace/close assemblies after importing, choose **Refresh Preview** to rerun matching against the modules currently loaded in dnSpy without reselecting the patch file; manual target overrides are preserved. Apply Safe combines all current `Exact` and `BaseChanged + Clean` entries into one preflighted dnSpy undo command. Finally, save the modified module using dnSpy's normal save command.
 3. **Move the patch baseline forward** — after resolving a newer assembly, choose **Export Rebased...** to write a new definition for future versions without overwriting the source patch.
 
@@ -264,7 +281,7 @@ The replay toolbar shows live counts such as `Apply Safe (5)`, and the status hi
 ### Phase 4 - cross-version rebase
 Manual candidate selection is session-local until the user explicitly exports an updated definition. Choosing **Use Candidate** stores an in-memory override and re-evaluates Exact/Clean-Rebase safety checks against that method; it never mutates the imported source file in place.
 
-**Export Rebased .ilpatch...** creates a new patch document. Entries proven safe by Exact, Already/RebasedApplied round-trip recovery, or Clean three-way rebase are rewritten onto the current target/baseline. Conflicting or unsupported entries are preserved unchanged and reported to the user.
+**Export Rebased .ilpatch...** creates a new patch document. Entries proven safe by Exact, Already/RebasedApplied round-trip recovery, or Clean three-way rebase are rewritten onto the current target/baseline. Conflicting or unsupported method entries are preserved unchanged and reported to the user, and v2 structural type records are preserved rather than being stripped.
 
 For instruction-only patches, clean rebase also preserves a limited set of upstream method-body metadata changes. Existing local slots must remain an exact prefix of the current local list, so locals appended by the newer build are safe while removals/reorders/retypes remain blocked. Upstream exception handlers are taken from the current method and translated through the merged instruction map. The analyzer rejects a rebase up front if a preserved current branch/switch target or EH boundary points into a current instruction range that the patch will replace; this avoids presenting a false Clean preview that would only fail later during materialization. Patch-side local/EH/InitLocals edits remain unsupported.
 
@@ -316,7 +333,7 @@ Exit codes are `0` for success, `1` for usage/I/O/unexpected failures and `2` fo
 
 `--json <report.json>` writes a camelCase report without changing the normal console output. The report includes the input/output paths, dry-run state, success/exit code, whether an output assembly was written, aggregate applicable/already-present counts, and per-patch/per-entry actions (`Exact`, `CleanRebase`, `AlreadyPresent`, or `Unresolved`). Conflict reports are written before exiting with code 2 and explicitly report `outputWritten: false`.
 
-The CLI currently accepts already-resolved patch definitions. Structural candidates are printed for diagnosis but never auto-selected; use the dnSpy Patch Workspace to confirm a manual candidate and **Export Rebased .ilpatch...** before headless deployment.
+The CLI replays v2 structural records with the same fail-closed materializer as the GUI, including whole replayable type additions/removals. Structural method *candidates* for renamed/signature-changed existing methods remain advisory and are never auto-selected; use the dnSpy Patch Workspace to confirm a manual candidate and **Export Rebased .ilpatch...** before headless deployment.
 
 `ilpatch rebase` is the headless equivalent of exporting an updated definition for one patch file. It never edits the target assembly and never overwrites the source patch. Every entry must be safely updateable through Exact, Already/RebasedApplied recovery, or a Clean three-way rebase; otherwise the command exits with code 2 and writes no rebased patch. Its optional JSON report records per-entry import/rebase status and whether the output patch was written.
 
@@ -325,21 +342,22 @@ The CLI currently accepts already-resolved patch definitions. Structural candida
 - [x] Add `Tools/ILPatch.Cli` with sequential multi-patch and `--dry-run` support.
 - [x] Accept patch directories and expand top-level `*.ilpatch` files in deterministic filename order.
 - [x] Add headless Exact / Clean-Rebase / fail-closed regression tests.
-- [x] Add a real CLI child-process / on-disk assembly integration test.
+- [x] Add real CLI child-process / on-disk assembly integration tests for both method-body and whole-type structural replay.
 - [x] Publish portable and Windows x64 CLI packages as CI artifacts.
 - [x] Wire release events to attach portable and Windows x64 CLI archives to GitHub Releases.
 - [x] Add machine-readable JSON report output for success and conflict paths.
 - [x] Add fail-closed `ilpatch rebase` for moving a resolved patch definition onto a newer assembly baseline.
 - [ ] Add explicit partial-apply mode only if a real workflow needs it.
 
-## Non-goals for the first version
+## Remaining structural non-goals
 
-The first version intentionally supports CIL method-body changes only. Later versions can extend the change-set model for:
+v2 deliberately does not claim to be a general-purpose metadata merger. Unsupported metadata continues to fail closed, notably:
 
-- adding/removing methods, fields and types;
-- metadata/custom attribute changes;
-- compiler-generated async/iterator state-machine members;
-- resources;
-- native/mixed-mode method bodies.
+- arbitrary custom-attribute edits;
+- generic parameter/constraint definition changes;
+- interface-list and explicit layout changes;
+- declarative security, marshal/RVA/P/Invoke metadata not represented by the structural snapshots;
+- resources and native/mixed-mode method bodies;
+- automatic semantic merging of incompatible structural edits made independently on both versions.
 
-Keeping these out of v1 lets the method-body workflow become reliable before the patch format grows into a general assembly merge format.
+The design keeps method CIL as the authoritative mergeable unit and grows structural support only where the metadata can be represented and replayed deterministically.
