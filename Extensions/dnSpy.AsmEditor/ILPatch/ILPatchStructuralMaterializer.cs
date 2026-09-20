@@ -23,6 +23,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 	/// </summary>
 	static class ILPatchStructuralMaterializer {
 		internal sealed class Plan {
+			readonly ModuleDef module;
+			readonly List<(TypeDef? Parent, TypeDef Type)> addedTypes;
+			readonly List<(TypeDef? Parent, TypeDef Type, int Index)> removedTypes;
 			readonly List<(TypeDef Type, FieldDef Field)> addedFields;
 			readonly List<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> addedMethods;
 			readonly List<(TypeDef Type, PropertyDef Property)> addedProperties;
@@ -34,9 +37,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 			bool additionsAttached;
 
 			public int OperationCount =>
+				addedTypes.Count + removedTypes.Count +
 				addedFields.Count + addedMethods.Count + addedProperties.Count + addedEvents.Count +
 				removedFields.Count + removedMethods.Count + removedProperties.Count + removedEvents.Count;
 
+			public IReadOnlyList<(TypeDef? Parent, TypeDef Type)> AddedTypes => addedTypes;
+			public IReadOnlyList<(TypeDef? Parent, TypeDef Type, int Index)> RemovedTypes => removedTypes;
 			public IReadOnlyList<(TypeDef Type, FieldDef Field)> AddedFields => addedFields;
 			public IReadOnlyList<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> AddedMethodEntries => addedMethods;
 			public IReadOnlyList<(TypeDef Type, PropertyDef Property)> AddedProperties => addedProperties;
@@ -48,7 +54,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 			public IReadOnlyList<(MethodDef Method, ILPatchMethodBodySnapshot? Body)> AddedMethods =>
 				addedMethods.Select(a => (a.Method, a.Body)).ToArray();
 
-			internal Plan(List<(TypeDef Type, FieldDef Field)> addedFields,
+			internal Plan(ModuleDef module,
+				List<(TypeDef? Parent, TypeDef Type)> addedTypes,
+				List<(TypeDef? Parent, TypeDef Type, int Index)> removedTypes,
+				List<(TypeDef Type, FieldDef Field)> addedFields,
 				List<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> addedMethods,
 				List<(TypeDef Type, PropertyDef Property)> addedProperties,
 				List<(TypeDef Type, EventDef Event)> addedEvents,
@@ -56,6 +65,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				List<(TypeDef Type, MethodDef Method, int Index)> removedMethods,
 				List<(TypeDef Type, PropertyDef Property, int Index)> removedProperties,
 				List<(TypeDef Type, EventDef Event, int Index)> removedEvents) {
+				this.module = module;
+				this.addedTypes = addedTypes;
+				this.removedTypes = removedTypes;
 				this.addedFields = addedFields;
 				this.addedMethods = addedMethods;
 				this.addedProperties = addedProperties;
@@ -69,6 +81,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 			public void AttachAdditions() {
 				if (additionsAttached)
 					return;
+				foreach (var item in addedTypes.OrderBy(a => TypeDepth(a.Type))) {
+					if (item.Parent is null)
+						module.Types.Add(item.Type);
+					else {
+						item.Type.DeclaringType2 = null;
+						item.Parent.NestedTypes.Add(item.Type);
+					}
+				}
 				foreach (var item in addedFields)
 					item.Type.Fields.Add(item.Field);
 				foreach (var item in addedMethods)
@@ -91,6 +111,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 					addedMethods[i].Type.Methods.Remove(addedMethods[i].Method);
 				for (int i = addedFields.Count - 1; i >= 0; i--)
 					addedFields[i].Type.Fields.Remove(addedFields[i].Field);
+				foreach (var item in addedTypes.OrderByDescending(a => TypeDepth(a.Type))) {
+					if (item.Parent is null)
+						module.Types.Remove(item.Type);
+					else
+						item.Parent.NestedTypes.Remove(item.Type);
+				}
 				additionsAttached = false;
 			}
 
@@ -103,6 +129,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 					item.Type.Methods.Remove(item.Method);
 				foreach (var item in removedFields)
 					item.Type.Fields.Remove(item.Field);
+				foreach (var item in removedTypes.OrderByDescending(a => TypeDepth(a.Type))) {
+					if (item.Parent is null)
+						module.Types.Remove(item.Type);
+					else
+						item.Parent.NestedTypes.Remove(item.Type);
+				}
 			}
 
 			public void RestoreRemovals() {
@@ -114,6 +146,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 					item.Type.Properties.Insert(item.Index, item.Property);
 				foreach (var item in removedEvents.OrderBy(a => a.Index))
 					item.Type.Events.Insert(item.Index, item.Event);
+				foreach (var item in removedTypes.OrderBy(a => TypeDepth(a.Type))) {
+					if (item.Parent is null)
+						module.Types.Insert(item.Index, item.Type);
+					else
+						item.Parent.NestedTypes.Insert(item.Index, item.Type);
+				}
+			}
+
+			static int TypeDepth(TypeDef type) {
+				int depth = 0;
+				for (var current = type.DeclaringType2; current is not null; current = current.DeclaringType2)
+					depth++;
+				return depth;
 			}
 		}
 
@@ -126,6 +171,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			plan = null;
 			error = string.Empty;
+			var addedTypes = new List<(TypeDef? Parent, TypeDef Type)>();
+			var removedTypes = new List<(TypeDef? Parent, TypeDef Type, int Index)>();
 			var addedFields = new List<(TypeDef, FieldDef)>();
 			var addedMethods = new List<(TypeDef, MethodDef, ILPatchMethodBodySnapshot?)>();
 			var addedProperties = new List<(TypeDef, PropertyDef)>();
@@ -134,17 +181,89 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var removedMethods = new List<(TypeDef, MethodDef, int)>();
 			var removedProperties = new List<(TypeDef, PropertyDef, int)>();
 			var removedEvents = new List<(TypeDef, EventDef, int)>();
-			var resolver = new TypeSigResolver(module);
+
+			var addedTypeMap = new Dictionary<string, (ILPatchTypeDefinitionSnapshot Definition, TypeDef Type)>(StringComparer.Ordinal);
+			foreach (var change in changes.Where(a => a.Kind == ILPatchTypeChangeKind.Add)) {
+				if (change.TypeDefinition is null) {
+					error = $"Added type '{change.Target}' is missing its type definition snapshot.";
+					return false;
+				}
+				string key = change.Target.ToCanonicalString();
+				if (addedTypeMap.ContainsKey(key)) {
+					error = $"Added type '{change.Target}' appears more than once in the patch.";
+					return false;
+				}
+				var shell = new TypeDefUser(change.TypeDefinition.Namespace, change.TypeDefinition.Name, null) {
+					Attributes = (TypeAttributes)change.TypeDefinition.Attributes,
+				};
+				addedTypeMap.Add(key, (change.TypeDefinition, shell));
+			}
+
+			foreach (var pair in addedTypeMap.Values) {
+				TypeDef? parent = null;
+				if (pair.Definition.DeclaringType is not null) {
+					if (addedTypeMap.TryGetValue(pair.Definition.DeclaringType.ToCanonicalString(), out var pendingParent))
+						parent = pendingParent.Type;
+					else if (!TryResolveType(module, pair.Definition.DeclaringType, out parent, out error))
+						return false;
+					pair.Type.DeclaringType2 = parent;
+				}
+				addedTypes.Add((parent, pair.Type));
+			}
+
+			var resolver = new TypeSigResolver(module, addedTypeMap.Values.Select(a => (ITypeDefOrRef)a.Type));
+			foreach (var pair in addedTypeMap.Values) {
+				if (pair.Definition.BaseType is not null) {
+					if (!resolver.TryCreate(pair.Definition.BaseType, out var baseTypeSig, out error))
+						return false;
+					if (baseTypeSig is TypeDefOrRefSig tdor)
+						pair.Type.BaseType = tdor.TypeDefOrRef;
+					else
+						pair.Type.BaseType = new TypeSpecUser(baseTypeSig!);
+				}
+			}
 
 			foreach (var change in changes) {
 				if (change is null || change.Target is null) {
 					error = "Structural change set is missing its declaring type identity.";
 					return false;
 				}
-				if (!TryResolveType(module, change.Target, out var type, out error))
-					return false;
 
-				foreach (var removed in change.RemovedFields) {
+				TypeDef? type;
+				ILPatchTypeChange effectiveChange = change;
+				if (change.Kind == ILPatchTypeChangeKind.Add) {
+					if (!addedTypeMap.TryGetValue(change.Target.ToCanonicalString(), out var pending)) {
+						error = $"Added type shell '{change.Target}' was not prepared.";
+						return false;
+					}
+					type = pending.Type;
+					var definition = pending.Definition;
+					effectiveChange = new ILPatchTypeChange { Target = change.Target };
+					effectiveChange.AddedFields.AddRange(definition.Fields);
+					effectiveChange.AddedMethods.AddRange(definition.Methods);
+					effectiveChange.AddedProperties.AddRange(definition.Properties);
+					effectiveChange.AddedEvents.AddRange(definition.Events);
+				}
+				else {
+					if (!TryResolveType(module, change.Target, out type, out error))
+						return false;
+					if (change.Kind == ILPatchTypeChangeKind.Remove) {
+						if (change.TypeDefinition is null) {
+							error = $"Removed type '{change.Target}' is missing its type definition snapshot.";
+							return false;
+						}
+						TypeDef? parent = type!.DeclaringType;
+						int index = parent is null ? module.Types.IndexOf(type) : parent.NestedTypes.IndexOf(type);
+						if (index < 0) {
+							error = $"Removed type '{change.Target}' is not attached to its expected owner.";
+							return false;
+						}
+						removedTypes.Add((parent, type, index));
+						continue;
+					}
+				}
+
+				foreach (var removed in effectiveChange.RemovedFields) {
 					var candidates = type!.Fields.Where(a =>
 						StringComparer.Ordinal.Equals(ILPatchFieldIdentity.Create(a).ToCanonicalString(),
 							removed.ToCanonicalString())).ToArray();
@@ -157,7 +276,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					removedFields.Add((type, candidates[0], type.Fields.IndexOf(candidates[0])));
 				}
 
-				foreach (var removed in change.RemovedMethods) {
+				foreach (var removed in effectiveChange.RemovedMethods) {
 					var candidates = type!.Methods.Where(a =>
 						StringComparer.Ordinal.Equals(ILPatchMethodIdentity.Create(a).ToCanonicalString(),
 							removed.ToCanonicalString())).ToArray();
@@ -170,7 +289,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					removedMethods.Add((type, candidates[0], type.Methods.IndexOf(candidates[0])));
 				}
 
-				foreach (var removed in change.RemovedProperties) {
+				foreach (var removed in effectiveChange.RemovedProperties) {
 					var candidates = type!.Properties.Where(a =>
 						StringComparer.Ordinal.Equals(ILPatchPropertyIdentity.Create(a).ToCanonicalString(),
 							removed.ToCanonicalString())).ToArray();
@@ -183,7 +302,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 					removedProperties.Add((type, candidates[0], type.Properties.IndexOf(candidates[0])));
 				}
 
-				foreach (var removed in change.RemovedEvents) {
+				foreach (var removed in effectiveChange.RemovedEvents) {
 					var candidates = type!.Events.Where(a =>
 						StringComparer.Ordinal.Equals(ILPatchEventIdentity.Create(a).ToCanonicalString(),
 							removed.ToCanonicalString())).ToArray();
@@ -196,9 +315,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 					removedEvents.Add((type, candidates[0], type.Events.IndexOf(candidates[0])));
 				}
 
-				foreach (var added in change.AddedFields) {
+				foreach (var added in effectiveChange.AddedFields) {
 					if (added?.Identity is null || added.FieldType is null) {
-						error = $"Type '{change.Target}' contains an incomplete added-field definition.";
+						error = $"Type '{effectiveChange.Target}' contains an incomplete added-field definition.";
 						return false;
 					}
 					if (type!.Fields.Any(a => StringComparer.Ordinal.Equals(
@@ -213,9 +332,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 					addedFields.Add((type, field));
 				}
 
-				foreach (var added in change.AddedMethods) {
+				foreach (var added in effectiveChange.AddedMethods) {
 					if (added?.Identity is null || added.Signature is null) {
-						error = $"Type '{change.Target}' contains an incomplete added-method definition.";
+						error = $"Type '{effectiveChange.Target}' contains an incomplete added-method definition.";
 						return false;
 					}
 					if (type!.Methods.Any(a => StringComparer.Ordinal.Equals(
@@ -236,9 +355,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 					addedMethods.Add((type, method, added.Body));
 				}
 
-				foreach (var added in change.AddedProperties) {
+				foreach (var added in effectiveChange.AddedProperties) {
 					if (added?.Identity is null || added.Signature is null) {
-						error = $"Type '{change.Target}' contains an incomplete added-property definition.";
+						error = $"Type '{effectiveChange.Target}' contains an incomplete added-property definition.";
 						return false;
 					}
 					if (type!.Properties.Any(a => StringComparer.Ordinal.Equals(
@@ -267,9 +386,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 					addedProperties.Add((type, property));
 				}
 
-				foreach (var added in change.AddedEvents) {
+				foreach (var added in effectiveChange.AddedEvents) {
 					if (added?.Identity is null || added.EventType is null) {
-						error = $"Type '{change.Target}' contains an incomplete added-event definition.";
+						error = $"Type '{effectiveChange.Target}' contains an incomplete added-event definition.";
 						return false;
 					}
 					if (type!.Events.Any(a => StringComparer.Ordinal.Equals(
@@ -308,7 +427,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 
 
-			plan = new Plan(addedFields, addedMethods, addedProperties, addedEvents,
+			plan = new Plan(module, addedTypes, removedTypes,
+				addedFields, addedMethods, addedProperties, addedEvents,
 				removedFields, removedMethods, removedProperties, removedEvents);
 			return true;
 		}
@@ -341,12 +461,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 				method.GenericParameters.Count != identity.GenericArity ||
 				(method.MethodSig?.HasThis == true) != identity.HasThis)
 				return false;
-			if (!string.IsNullOrEmpty(identity.ModuleName) &&
-				!StringComparer.Ordinal.Equals(declaringType.Module?.Name?.String ?? string.Empty, identity.ModuleName))
-				return false;
-			if (!string.IsNullOrEmpty(identity.AssemblyName) &&
-				!StringComparer.Ordinal.Equals(declaringType.Module?.Assembly?.Name?.String ?? string.Empty, identity.AssemblyName))
-				return false;
+			if (declaringType.Module is not null) {
+				if (!string.IsNullOrEmpty(identity.ModuleName) &&
+					!StringComparer.Ordinal.Equals(declaringType.Module.Name?.String ?? string.Empty, identity.ModuleName))
+					return false;
+				if (!string.IsNullOrEmpty(identity.AssemblyName) &&
+					!StringComparer.Ordinal.Equals(declaringType.Module.Assembly?.Name?.String ?? string.Empty, identity.AssemblyName))
+					return false;
+			}
 			var parameters = method.MethodSig?.Params ?? Array.Empty<TypeSig>();
 			if (parameters.Count != identity.ParameterTypes.Count)
 				return false;
@@ -389,7 +511,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			readonly Dictionary<string, TypeSig> corlib = new Dictionary<string, TypeSig>(StringComparer.Ordinal);
 			readonly Dictionary<string, ITypeDefOrRef> named = new Dictionary<string, ITypeDefOrRef>(StringComparer.Ordinal);
 
-			public TypeSigResolver(ModuleDef module) {
+			public TypeSigResolver(ModuleDef module, IEnumerable<ITypeDefOrRef>? additionalTypes = null) {
 				this.module = module;
 				AddCorLib(module.CorLibTypes.Void);
 				AddCorLib(module.CorLibTypes.Boolean);
@@ -414,6 +536,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 					AddNamed(type);
 				foreach (var type in module.GetTypeRefs())
 					AddNamed(type);
+				if (additionalTypes is not null) {
+					foreach (var type in additionalTypes)
+						AddNamed(type);
+				}
 			}
 
 			void AddCorLib(TypeSig type) {
