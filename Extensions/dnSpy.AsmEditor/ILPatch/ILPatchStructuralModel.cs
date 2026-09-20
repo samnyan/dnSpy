@@ -215,12 +215,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public ILPatchTypeDefinitionSnapshot? TypeDefinition { get; set; }
 		public List<ILPatchFieldDefinitionSnapshot> AddedFields { get; } = new List<ILPatchFieldDefinitionSnapshot>();
 		public List<ILPatchFieldIdentity> RemovedFields { get; } = new List<ILPatchFieldIdentity>();
+		public List<ILPatchFieldDefinitionSnapshot> RemovedFieldBaselines { get; } = new List<ILPatchFieldDefinitionSnapshot>();
 		public List<ILPatchMethodDefinitionSnapshot> AddedMethods { get; } = new List<ILPatchMethodDefinitionSnapshot>();
 		public List<ILPatchMethodIdentity> RemovedMethods { get; } = new List<ILPatchMethodIdentity>();
+		public List<ILPatchMethodDefinitionSnapshot> RemovedMethodBaselines { get; } = new List<ILPatchMethodDefinitionSnapshot>();
 		public List<ILPatchPropertyDefinitionSnapshot> AddedProperties { get; } = new List<ILPatchPropertyDefinitionSnapshot>();
 		public List<ILPatchPropertyIdentity> RemovedProperties { get; } = new List<ILPatchPropertyIdentity>();
+		public List<ILPatchPropertyDefinitionSnapshot> RemovedPropertyBaselines { get; } = new List<ILPatchPropertyDefinitionSnapshot>();
 		public List<ILPatchEventDefinitionSnapshot> AddedEvents { get; } = new List<ILPatchEventDefinitionSnapshot>();
 		public List<ILPatchEventIdentity> RemovedEvents { get; } = new List<ILPatchEventIdentity>();
+		public List<ILPatchEventDefinitionSnapshot> RemovedEventBaselines { get; } = new List<ILPatchEventDefinitionSnapshot>();
 
 		public bool HasEffectiveChange =>
 			Kind != ILPatchTypeChangeKind.Modify ||
@@ -232,19 +236,42 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 
 	static class ILPatchStructuralSnapshotComparer {
+		public static bool AreEquivalent(ILPatchFieldDefinitionSnapshot expected,
+			ILPatchFieldDefinitionSnapshot current, out string reason) =>
+			Compare(FieldFingerprint(expected), FieldFingerprint(current),
+				"The target field no longer matches the structural baseline captured by this patch.", out reason);
+
+		public static bool AreEquivalent(ILPatchMethodDefinitionSnapshot expected,
+			ILPatchMethodDefinitionSnapshot current, out string reason) =>
+			Compare(MethodFingerprint(expected), MethodFingerprint(current),
+				"The target method no longer matches the structural baseline captured by this patch.", out reason);
+
+		public static bool AreEquivalent(ILPatchPropertyDefinitionSnapshot expected,
+			ILPatchPropertyDefinitionSnapshot current, out string reason) =>
+			Compare(PropertyFingerprint(expected), PropertyFingerprint(current),
+				"The target property no longer matches the structural baseline captured by this patch.", out reason);
+
+		public static bool AreEquivalent(ILPatchEventDefinitionSnapshot expected,
+			ILPatchEventDefinitionSnapshot current, out string reason) =>
+			Compare(EventFingerprint(expected), EventFingerprint(current),
+				"The target event no longer matches the structural baseline captured by this patch.", out reason);
+
 		public static bool AreEquivalent(ILPatchTypeDefinitionSnapshot expected,
 			ILPatchTypeDefinitionSnapshot current, out string reason) {
 			if (expected is null)
 				throw new ArgumentNullException(nameof(expected));
 			if (current is null)
 				throw new ArgumentNullException(nameof(current));
-			string expectedFingerprint = TypeFingerprint(expected);
-			string currentFingerprint = TypeFingerprint(current);
-			if (StringComparer.Ordinal.Equals(expectedFingerprint, currentFingerprint)) {
+			return Compare(TypeFingerprint(expected), TypeFingerprint(current),
+				"The target type no longer matches the structural baseline captured by this patch.", out reason);
+		}
+
+		static bool Compare(string expected, string current, string mismatchReason, out string reason) {
+			if (StringComparer.Ordinal.Equals(expected, current)) {
 				reason = string.Empty;
 				return true;
 			}
-			reason = "The target type no longer matches the structural baseline captured by this patch.";
+			reason = mismatchReason;
 			return false;
 		}
 

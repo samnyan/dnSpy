@@ -198,7 +198,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 					typeChange.AddedFields.Add(snapshot);
 				}
 				else {
-					typeChange.RemovedFields.Add(ILPatchFieldIdentity.Create(beforeField!));
+					if (!ILPatchStructuralSnapshotBuilder.TryCreateField(beforeField!, out var snapshot, out string error) ||
+						snapshot is null) {
+						report.UnsupportedReasons.Add(error);
+						continue;
+					}
+					typeChange.RemovedFields.Add(snapshot.Identity);
+					typeChange.RemovedFieldBaselines.Add(snapshot);
 				}
 				report.StructuralChangedCount++;
 				report.ChangedCount++;
@@ -225,7 +231,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 					typeChange.AddedMethods.Add(snapshot);
 				}
 				else {
-					typeChange.RemovedMethods.Add(ILPatchMethodIdentity.Create(beforeMethod!));
+					if (!ILPatchStructuralSnapshotBuilder.TryCreateMethod(beforeMethod!, out var snapshot, out string error) ||
+						snapshot is null) {
+						report.UnsupportedReasons.Add(error);
+						continue;
+					}
+					typeChange.RemovedMethods.Add(snapshot.Identity);
+					typeChange.RemovedMethodBaselines.Add(snapshot);
 				}
 				report.StructuralChangedCount++;
 				report.ChangedCount++;
@@ -253,7 +265,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 					typeChange.AddedProperties.Add(snapshot);
 				}
 				else {
-					typeChange.RemovedProperties.Add(ILPatchPropertyIdentity.Create(beforeProperty!));
+					if (!ILPatchStructuralSnapshotBuilder.TryCreateProperty(beforeProperty!, out var snapshot, out string error) ||
+						snapshot is null) {
+						report.UnsupportedReasons.Add(error);
+						continue;
+					}
+					typeChange.RemovedProperties.Add(snapshot.Identity);
+					typeChange.RemovedPropertyBaselines.Add(snapshot);
 				}
 				report.StructuralChangedCount++;
 				report.ChangedCount++;
@@ -280,7 +298,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 					typeChange.AddedEvents.Add(snapshot);
 				}
 				else {
-					typeChange.RemovedEvents.Add(ILPatchEventIdentity.Create(beforeEvent!));
+					if (!ILPatchStructuralSnapshotBuilder.TryCreateEvent(beforeEvent!, out var snapshot, out string error) ||
+						snapshot is null) {
+						report.UnsupportedReasons.Add(error);
+						continue;
+					}
+					typeChange.RemovedEvents.Add(snapshot.Identity);
+					typeChange.RemovedEventBaselines.Add(snapshot);
 				}
 				report.StructuralChangedCount++;
 				report.ChangedCount++;

@@ -295,6 +295,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 							: $"Field to remove '{removed}' is ambiguous ({candidates.Length} matches).";
 						return false;
 					}
+					var fieldBaseline = effectiveChange.RemovedFieldBaselines.FirstOrDefault(a =>
+						StringComparer.Ordinal.Equals(a.Identity.ToCanonicalString(), removed.ToCanonicalString()));
+					if (fieldBaseline is not null) {
+						if (!ILPatchStructuralSnapshotBuilder.TryCreateField(candidates[0], out var current, out string baselineError) ||
+							current is null) {
+							error = $"Could not validate field removal baseline for '{removed}': {baselineError}";
+							return false;
+						}
+						if (!ILPatchStructuralSnapshotComparer.AreEquivalent(fieldBaseline, current, out string mismatchReason)) {
+							error = $"Field to remove '{removed}' changed since the patch baseline. {mismatchReason}";
+							return false;
+						}
+					}
 					removedFields.Add((type, candidates[0], type.Fields.IndexOf(candidates[0])));
 				}
 
@@ -307,6 +320,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 							? $"Method to remove '{removed}' was not found."
 							: $"Method to remove '{removed}' is ambiguous ({candidates.Length} matches).";
 						return false;
+					}
+					var methodBaseline = effectiveChange.RemovedMethodBaselines.FirstOrDefault(a =>
+						StringComparer.Ordinal.Equals(a.Identity.ToCanonicalString(), removed.ToCanonicalString()));
+					if (methodBaseline is not null) {
+						if (!ILPatchStructuralSnapshotBuilder.TryCreateMethod(candidates[0], out var current, out string baselineError) ||
+							current is null) {
+							error = $"Could not validate method removal baseline for '{removed}': {baselineError}";
+							return false;
+						}
+						if (!ILPatchStructuralSnapshotComparer.AreEquivalent(methodBaseline, current, out string mismatchReason)) {
+							error = $"Method to remove '{removed}' changed since the patch baseline. {mismatchReason}";
+							return false;
+						}
 					}
 					removedMethods.Add((type, candidates[0], type.Methods.IndexOf(candidates[0])));
 				}
@@ -321,6 +347,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 							: $"Property to remove '{removed}' is ambiguous ({candidates.Length} matches).";
 						return false;
 					}
+					var propertyBaseline = effectiveChange.RemovedPropertyBaselines.FirstOrDefault(a =>
+						StringComparer.Ordinal.Equals(a.Identity.ToCanonicalString(), removed.ToCanonicalString()));
+					if (propertyBaseline is not null) {
+						if (!ILPatchStructuralSnapshotBuilder.TryCreateProperty(candidates[0], out var current, out string baselineError) ||
+							current is null) {
+							error = $"Could not validate property removal baseline for '{removed}': {baselineError}";
+							return false;
+						}
+						if (!ILPatchStructuralSnapshotComparer.AreEquivalent(propertyBaseline, current, out string mismatchReason)) {
+							error = $"Property to remove '{removed}' changed since the patch baseline. {mismatchReason}";
+							return false;
+						}
+					}
 					removedProperties.Add((type, candidates[0], type.Properties.IndexOf(candidates[0])));
 				}
 
@@ -333,6 +372,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 							? $"Event to remove '{removed}' was not found."
 							: $"Event to remove '{removed}' is ambiguous ({candidates.Length} matches).";
 						return false;
+					}
+					var eventBaseline = effectiveChange.RemovedEventBaselines.FirstOrDefault(a =>
+						StringComparer.Ordinal.Equals(a.Identity.ToCanonicalString(), removed.ToCanonicalString()));
+					if (eventBaseline is not null) {
+						if (!ILPatchStructuralSnapshotBuilder.TryCreateEvent(candidates[0], out var current, out string baselineError) ||
+							current is null) {
+							error = $"Could not validate event removal baseline for '{removed}': {baselineError}";
+							return false;
+						}
+						if (!ILPatchStructuralSnapshotComparer.AreEquivalent(eventBaseline, current, out string mismatchReason)) {
+							error = $"Event to remove '{removed}' changed since the patch baseline. {mismatchReason}";
+							return false;
+						}
 					}
 					removedEvents.Add((type, candidates[0], type.Events.IndexOf(candidates[0])));
 				}

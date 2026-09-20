@@ -53,6 +53,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(HeadlessStructuralConflictRollsBackAdditions), HeadlessStructuralConflictRollsBackAdditions),
 				(nameof(HeadlessWholeTypeAddRejectsExistingType), HeadlessWholeTypeAddRejectsExistingType),
 				(nameof(HeadlessWholeTypeRemoveRejectsChangedType), HeadlessWholeTypeRemoveRejectsChangedType),
+				(nameof(HeadlessRemovedMethodRejectsChangedBody), HeadlessRemovedMethodRejectsChangedBody),
+				(nameof(HeadlessRemovedFieldRejectsChangedMetadata), HeadlessRemovedFieldRejectsChangedMetadata),
 				(nameof(SerializerReadsLegacyV1Document), SerializerReadsLegacyV1Document),
 				(nameof(DocumentCreatorRejectsMethodFlagChange), DocumentCreatorRejectsMethodFlagChange),
 				(nameof(DocumentCreatorDiskRoundTripCapturesBodyChange), DocumentCreatorDiskRoundTripCapturesBodyChange),
@@ -1267,6 +1269,49 @@ namespace dnSpy.AsmEditor.ILPatch {
 				"Rejected whole-type removal must leave the target type attached.");
 			True(report.StructuralMessage.Contains("changed since the patch baseline", StringComparison.Ordinal),
 				"Removal conflict should explain the structural baseline mismatch.");
+		}
+
+
+		static void HeadlessRemovedMethodRejectsChangedBody() {
+			var original = CreateNamedIntMethod("Run", 1);
+			AddConstantMethod(original.DeclaringType!, "OldMethod", 9);
+			var modified = CreateNamedIntMethod("Run", 1);
+
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "remove-method-guard",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Removed-method patch should be created.");
+			True(document!.TypeChanges[0].RemovedMethodBaselines.Count == 1,
+				"New v2 removed-method records should carry a baseline definition.");
+
+			var current = CreateNamedIntMethod("Run", 1);
+			AddConstantMethod(current.DeclaringType!, "OldMethod", 10);
+			var report = ILPatchHeadlessApplier.Apply(current.Module, document);
+			False(report.Success, "Removed method must not be deleted after its body changed upstream.");
+			True(current.DeclaringType!.Methods.Any(a => StringComparer.Ordinal.Equals(a.Name?.String, "OldMethod")),
+				"Rejected method removal must preserve the method.");
+			True(report.StructuralMessage.Contains("changed since the patch baseline", StringComparison.Ordinal),
+				"Method removal conflict should explain the baseline mismatch.");
+		}
+
+		static void HeadlessRemovedFieldRejectsChangedMetadata() {
+			var original = CreateNamedIntMethod("Run", 1);
+			original.DeclaringType!.Fields.Add(new FieldDefUser("OldField",
+				new FieldSig(original.Module.CorLibTypes.Int32), FieldAttributes.Public));
+			var modified = CreateNamedIntMethod("Run", 1);
+
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "remove-field-guard",
+				out var document, out var createReport), string.Join(" ", createReport.UnsupportedReasons));
+			NotNull(document, "Removed-field patch should be created.");
+			True(document!.TypeChanges[0].RemovedFieldBaselines.Count == 1,
+				"New v2 removed-field records should carry a baseline definition.");
+
+			var current = CreateNamedIntMethod("Run", 1);
+			current.DeclaringType!.Fields.Add(new FieldDefUser("OldField",
+				new FieldSig(current.Module.CorLibTypes.Int32), FieldAttributes.Private));
+			var report = ILPatchHeadlessApplier.Apply(current.Module, document);
+			False(report.Success, "Removed field must not be deleted after its metadata changed upstream.");
+			True(current.DeclaringType.Fields.Any(a => StringComparer.Ordinal.Equals(a.Name?.String, "OldField")),
+				"Rejected field removal must preserve the field.");
 		}
 
 		static void SerializerReadsLegacyV1Document() {
