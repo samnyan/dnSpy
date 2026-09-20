@@ -58,6 +58,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 
 			foreach (var source in sources) {
+				if (source.Document.TypeChanges.Count != 0 && sources.Count > 1) {
+					error = $"'{source.Name}' contains type/member structural changes. Multi-file structural composition is not implemented yet; import it separately.";
+					return false;
+				}
 				foreach (var patch in source.Document.Methods) {
 					if (patch is null || patch.Target is null) {
 						error = $"'{source.Name}' contains an incomplete patch entry without a target identity.";
@@ -83,6 +87,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 					targets.Add(targetKey, source.Name);
 					result.Methods.Add(patch);
 				}
+				if (sources.Count == 1)
+					result.TypeChanges.AddRange(source.Document.TypeChanges);
 			}
 
 			combined = result;

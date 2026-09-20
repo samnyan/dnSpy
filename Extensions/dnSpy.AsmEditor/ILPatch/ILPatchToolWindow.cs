@@ -881,6 +881,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 		void ApplyImportedChanges(bool includeExact, bool includeCleanRebase, string failureTitle) {
 			if (importedPreview is null || importedSourceLabel is null || importedDefaultBaseName is null)
 				return;
+			if (importedPreview.Document.TypeChanges.Count != 0) {
+				MsgBox.Instance.Show(
+					$"This ILPatch contains {importedPreview.Document.TypeChanges.Count} type-level structural change set(s). " +
+					"Automatic structural replay is not enabled in this build yet, so Apply is blocked rather than silently dropping them.");
+				return;
+			}
 
 			try {
 				// Re-run matching immediately before materialization so a stale preview or changed

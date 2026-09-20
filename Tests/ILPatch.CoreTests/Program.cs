@@ -39,7 +39,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				(nameof(BatchComposerRejectsOverlappingTargets), BatchComposerRejectsOverlappingTargets),
 				(nameof(DocumentCreatorCapturesMethodBodyChange), DocumentCreatorCapturesMethodBodyChange),
 				(nameof(DocumentCreatorIgnoresMaxStackNoise), DocumentCreatorIgnoresMaxStackNoise),
-				(nameof(DocumentCreatorRejectsAddedMethod), DocumentCreatorRejectsAddedMethod),
+				(nameof(DocumentCreatorCapturesAddedMethod), DocumentCreatorCapturesAddedMethod),
+				(nameof(DocumentCreatorCapturesAddedAndRemovedField), DocumentCreatorCapturesAddedAndRemovedField),
+				(nameof(SerializerReadsLegacyV1Document), SerializerReadsLegacyV1Document),
 				(nameof(DocumentCreatorRejectsMethodFlagChange), DocumentCreatorRejectsMethodFlagChange),
 				(nameof(DocumentCreatorDiskRoundTripCapturesBodyChange), DocumentCreatorDiskRoundTripCapturesBodyChange),
 				(nameof(DiffEngineAlignsModifiedLines), DiffEngineAlignsModifiedLines),
@@ -807,7 +809,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			Equal(0, document!.Methods.Count, "No patch entry should be emitted for MaxStack-only noise.");
 		}
 
-		static void DocumentCreatorRejectsAddedMethod() {
+		static void DocumentCreatorCapturesAddedMethod() {
 			var original = CreateNamedIntMethod("Run", 1);
 			var modified = CreateNamedIntMethod("Run", 1);
 			var type = modified.DeclaringType!;
@@ -817,12 +819,45 @@ namespace dnSpy.AsmEditor.ILPatch {
 			added.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
 			type.Methods.Add(added);
 
-			False(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "unsupported",
-				out var document, out var report),
-				"Added methods are outside the v1 method-body patch format and must fail closed.");
-			True(document is null, "Failed creation must not return a partial patch document.");
-			True(report.UnsupportedReasons.Any(a => a.Contains("added method", StringComparison.OrdinalIgnoreCase)),
-				"Create report should identify the added method.");
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "structural",
+				out var document, out var report), string.Join(" ", report.UnsupportedReasons));
+			NotNull(document, "Structural v2 creation should return a document.");
+			Equal(2, document!.FormatVersion, "Structural member records require ILPatch v2.");
+			Equal(1, document.TypeChanges.Count, "Added method should be grouped under its declaring type.");
+			Equal(1, document.TypeChanges[0].AddedMethods.Count, "Added method definition should be captured.");
+			Equal("Added", document.TypeChanges[0].AddedMethods[0].Identity.MethodName,
+				"Captured method identity should preserve the new method name.");
+			Equal(1, report.StructuralChangedCount, "Report should count the added method as one structural change.");
+			Equal(0, report.UnsupportedCount, "Simple added CIL method should be supported by the v2 record model.");
+		}
+
+		static void DocumentCreatorCapturesAddedAndRemovedField() {
+			var original = CreateNamedIntMethod("Run", 1);
+			original.DeclaringType!.Fields.Add(new FieldDefUser("OldValue",
+				new FieldSig(original.Module.CorLibTypes.Int32), FieldAttributes.Public));
+			var modified = CreateNamedIntMethod("Run", 1);
+			modified.DeclaringType!.Fields.Add(new FieldDefUser("NewValue",
+				new FieldSig(modified.Module.CorLibTypes.String), FieldAttributes.Private));
+
+			True(ILPatchDocumentCreator.TryCreate(original.Module, modified.Module, "fields",
+				out var document, out var report), string.Join(" ", report.UnsupportedReasons));
+			NotNull(document, "Field topology change should produce a v2 document.");
+			Equal(1, document!.TypeChanges.Count, "Both field operations belong to one type change.");
+			Equal(1, document.TypeChanges[0].AddedFields.Count, "New field should be recorded.");
+			Equal(1, document.TypeChanges[0].RemovedFields.Count, "Removed field should be recorded.");
+			Equal(2, report.StructuralChangedCount, "Add + remove field should count as two structural changes.");
+		}
+
+		static void SerializerReadsLegacyV1Document() {
+			var method = CreateNamedIntMethod("Run", 1);
+			var patch = CreateRealBodyConstantPatch(method, 2);
+			var document = new ILPatchDocument { FormatVersion = 1, Name = "legacy" };
+			document.Methods.Add(patch);
+			string json = ILPatchSerializer.Serialize(document);
+			var loaded = ILPatchSerializer.Deserialize(json);
+			Equal(1, loaded.FormatVersion, "Deserializer should preserve legacy v1 format metadata.");
+			Equal(1, loaded.Methods.Count, "Legacy v1 method entries must remain readable.");
+			Equal(0, loaded.TypeChanges.Count, "Legacy v1 documents should have an empty structural change collection.");
 		}
 
 		static void InlineDiffHighlightsSeparatedTokenChanges() {

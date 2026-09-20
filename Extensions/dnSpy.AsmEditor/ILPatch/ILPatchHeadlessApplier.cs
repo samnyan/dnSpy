@@ -80,6 +80,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 				throw new ArgumentNullException(nameof(module));
 			if (document is null)
 				throw new ArgumentNullException(nameof(document));
+			if (document.TypeChanges.Count != 0)
+				throw new NotSupportedException(
+					"ILPatch v2 structural member changes are present, but this apply path has not materialized them yet. Nothing was modified.");
 
 			var preview = ILPatchImportMatcher.CreatePreview(document, new[] { module });
 			var materializer = new ILPatchBodyMaterializer(module);
