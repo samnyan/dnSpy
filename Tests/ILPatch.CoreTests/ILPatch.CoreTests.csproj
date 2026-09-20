@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchModel.cs" Link="Core\ILPatchModel.cs" />
+    <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchStructuralModel.cs" Link="Core\ILPatchStructuralModel.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchBodyHasher.cs" Link="Core\ILPatchBodyHasher.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\ILPatchSerializer.cs" Link="Core\ILPatchSerializer.cs" />
     <Compile Include="..\..\Extensions\dnSpy.AsmEditor\ILPatch\CilNormalizer.cs" Link="Core\CilNormalizer.cs" />

@@ -46,8 +46,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var document = JsonConvert.DeserializeObject<ILPatchDocument>(json, CreateSettings());
 			if (document is null)
 				throw new InvalidDataException("The ILPatch document is empty or invalid.");
-			if (document.FormatVersion != ILPatchDocument.CurrentFormatVersion)
-				throw new NotSupportedException($"Unsupported ILPatch format version {document.FormatVersion}. Expected {ILPatchDocument.CurrentFormatVersion}.");
+			if (document.FormatVersion < ILPatchDocument.MinimumSupportedFormatVersion ||
+				document.FormatVersion > ILPatchDocument.CurrentFormatVersion) {
+				throw new NotSupportedException(
+					$"Unsupported ILPatch format version {document.FormatVersion}. " +
+					$"Supported range is {ILPatchDocument.MinimumSupportedFormatVersion}-{ILPatchDocument.CurrentFormatVersion}.");
+			}
 			return document;
 		}
 

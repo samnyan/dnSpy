@@ -30,12 +30,14 @@ namespace dnSpy.AsmEditor.ILPatch {
 	/// data makes three-way rebasing possible later without depending on the original DLL.
 	/// </summary>
 	sealed class ILPatchDocument {
-		public const int CurrentFormatVersion = 1;
+		public const int CurrentFormatVersion = 2;
+		public const int MinimumSupportedFormatVersion = 1;
 
 		public int FormatVersion { get; set; } = CurrentFormatVersion;
 		public string Name { get; set; } = string.Empty;
 		public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
 		public List<ILPatchMethodChange> Methods { get; } = new List<ILPatchMethodChange>();
+		public List<ILPatchTypeChange> TypeChanges { get; } = new List<ILPatchTypeChange>();
 	}
 
 	sealed class ILPatchMethodChange {
