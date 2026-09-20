@@ -71,19 +71,32 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 
 			foreach (string typeName in allTypeNames) {
-				if (!originalTypes.TryGetValue(typeName, out var beforeType) ||
-					!modifiedTypes.TryGetValue(typeName, out var afterType)) {
-					// Type add/remove is intentionally still guarded by the shape guard above.
+				bool hasBefore = originalTypes.TryGetValue(typeName, out var beforeType);
+				bool hasAfter = modifiedTypes.TryGetValue(typeName, out var afterType);
+				if (!hasBefore || !hasAfter) {
+					var sourceType = hasAfter ? afterType! : beforeType!;
+					if (!ILPatchStructuralSnapshotBuilder.TryCreateType(sourceType, out var typeSnapshot, out string typeError) ||
+						typeSnapshot is null) {
+						report.UnsupportedReasons.Add(typeError);
+						continue;
+					}
+					created.TypeChanges.Add(new ILPatchTypeChange {
+						Target = typeSnapshot.Identity,
+						Kind = hasAfter ? ILPatchTypeChangeKind.Add : ILPatchTypeChangeKind.Remove,
+						TypeDefinition = typeSnapshot,
+					});
+					report.StructuralChangedCount++;
+					report.ChangedCount++;
 					continue;
 				}
 
 				var typeChange = new ILPatchTypeChange {
-					Target = ILPatchTypeIdentity.Create(beforeType),
+					Target = ILPatchTypeIdentity.Create(beforeType!),
 				};
-				CaptureFieldTopology(beforeType, afterType, typeChange, report);
-				CaptureMethodTopology(beforeType, afterType, typeChange, report);
-				CapturePropertyTopology(beforeType, afterType, typeChange, report);
-				CaptureEventTopology(beforeType, afterType, typeChange, report);
+				CaptureFieldTopology(beforeType!, afterType!, typeChange, report);
+				CaptureMethodTopology(beforeType!, afterType!, typeChange, report);
+				CapturePropertyTopology(beforeType!, afterType!, typeChange, report);
+				CaptureEventTopology(beforeType!, afterType!, typeChange, report);
 				if (typeChange.HasEffectiveChange)
 					created.TypeChanges.Add(typeChange);
 			}
@@ -161,7 +174,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 			StringComparer.Ordinal.Equals(change.Kind, "Property added") ||
 			StringComparer.Ordinal.Equals(change.Kind, "Property removed") ||
 			StringComparer.Ordinal.Equals(change.Kind, "Event added") ||
-			StringComparer.Ordinal.Equals(change.Kind, "Event removed");
+			StringComparer.Ordinal.Equals(change.Kind, "Event removed") ||
+			StringComparer.Ordinal.Equals(change.Kind, "Type added") ||
+			StringComparer.Ordinal.Equals(change.Kind, "Type removed");
 
 		static void CaptureFieldTopology(TypeDef beforeType, TypeDef afterType,
 			ILPatchTypeChange typeChange, ILPatchCreateReport report) {
