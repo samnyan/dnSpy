@@ -82,6 +82,8 @@ namespace dnSpy.AsmEditor.ILPatch {
 				};
 				CaptureFieldTopology(beforeType, afterType, typeChange, report);
 				CaptureMethodTopology(beforeType, afterType, typeChange, report);
+				CapturePropertyTopology(beforeType, afterType, typeChange, report);
+				CaptureEventTopology(beforeType, afterType, typeChange, report);
 				if (typeChange.HasEffectiveChange)
 					created.TypeChanges.Add(typeChange);
 			}
@@ -155,7 +157,11 @@ namespace dnSpy.AsmEditor.ILPatch {
 			StringComparer.Ordinal.Equals(change.Kind, "Field added") ||
 			StringComparer.Ordinal.Equals(change.Kind, "Field removed") ||
 			StringComparer.Ordinal.Equals(change.Kind, "Method metadata added") ||
-			StringComparer.Ordinal.Equals(change.Kind, "Method metadata removed");
+			StringComparer.Ordinal.Equals(change.Kind, "Method metadata removed") ||
+			StringComparer.Ordinal.Equals(change.Kind, "Property added") ||
+			StringComparer.Ordinal.Equals(change.Kind, "Property removed") ||
+			StringComparer.Ordinal.Equals(change.Kind, "Event added") ||
+			StringComparer.Ordinal.Equals(change.Kind, "Event removed");
 
 		static void CaptureFieldTopology(TypeDef beforeType, TypeDef afterType,
 			ILPatchTypeChange typeChange, ILPatchCreateReport report) {
@@ -211,6 +217,61 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 		}
 
+
+		static void CapturePropertyTopology(TypeDef beforeType, TypeDef afterType,
+			ILPatchTypeChange typeChange, ILPatchCreateReport report) {
+			var before = BuildPropertyIndex(beforeType);
+			var after = BuildPropertyIndex(afterType);
+			var keys = new SortedSet<string>(before.Keys, StringComparer.Ordinal);
+			keys.UnionWith(after.Keys);
+			foreach (string key in keys) {
+				bool hasBefore = before.TryGetValue(key, out var beforeProperty);
+				bool hasAfter = after.TryGetValue(key, out var afterProperty);
+				if (hasBefore && hasAfter)
+					continue;
+				if (hasAfter) {
+					if (!ILPatchStructuralSnapshotBuilder.TryCreateProperty(afterProperty!, out var snapshot, out string error) ||
+						snapshot is null) {
+						report.UnsupportedReasons.Add(error);
+						continue;
+					}
+					typeChange.AddedProperties.Add(snapshot);
+				}
+				else {
+					typeChange.RemovedProperties.Add(ILPatchPropertyIdentity.Create(beforeProperty!));
+				}
+				report.StructuralChangedCount++;
+				report.ChangedCount++;
+			}
+		}
+
+		static void CaptureEventTopology(TypeDef beforeType, TypeDef afterType,
+			ILPatchTypeChange typeChange, ILPatchCreateReport report) {
+			var before = BuildEventIndex(beforeType);
+			var after = BuildEventIndex(afterType);
+			var keys = new SortedSet<string>(before.Keys, StringComparer.Ordinal);
+			keys.UnionWith(after.Keys);
+			foreach (string key in keys) {
+				bool hasBefore = before.TryGetValue(key, out var beforeEvent);
+				bool hasAfter = after.TryGetValue(key, out var afterEvent);
+				if (hasBefore && hasAfter)
+					continue;
+				if (hasAfter) {
+					if (!ILPatchStructuralSnapshotBuilder.TryCreateEvent(afterEvent!, out var snapshot, out string error) ||
+						snapshot is null) {
+						report.UnsupportedReasons.Add(error);
+						continue;
+					}
+					typeChange.AddedEvents.Add(snapshot);
+				}
+				else {
+					typeChange.RemovedEvents.Add(ILPatchEventIdentity.Create(beforeEvent!));
+				}
+				report.StructuralChangedCount++;
+				report.ChangedCount++;
+			}
+		}
+
 		static Dictionary<string, TypeDef> BuildTypeIndex(ModuleDef module) {
 			var result = new Dictionary<string, TypeDef>(StringComparer.Ordinal);
 			foreach (var type in module.GetTypes()) {
@@ -227,6 +288,26 @@ namespace dnSpy.AsmEditor.ILPatch {
 				string key = ILPatchFieldIdentity.Create(field).ToCanonicalString();
 				if (!result.ContainsKey(key))
 					result.Add(key, field);
+			}
+			return result;
+		}
+
+		static Dictionary<string, PropertyDef> BuildPropertyIndex(TypeDef type) {
+			var result = new Dictionary<string, PropertyDef>(StringComparer.Ordinal);
+			foreach (var property in type.Properties) {
+				string key = ILPatchPropertyIdentity.Create(property).ToCanonicalString();
+				if (!result.ContainsKey(key))
+					result.Add(key, property);
+			}
+			return result;
+		}
+
+		static Dictionary<string, EventDef> BuildEventIndex(TypeDef type) {
+			var result = new Dictionary<string, EventDef>(StringComparer.Ordinal);
+			foreach (var @event in type.Events) {
+				string key = ILPatchEventIdentity.Create(@event).ToCanonicalString();
+				if (!result.ContainsKey(key))
+					result.Add(key, @event);
 			}
 			return result;
 		}

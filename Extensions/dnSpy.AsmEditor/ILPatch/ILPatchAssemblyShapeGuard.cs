@@ -133,12 +133,17 @@ namespace dnSpy.AsmEditor.ILPatch {
 				foreach (var property in type.Properties) {
 					string target = property.FullName;
 					Add("property|" + target, "Property", target,
-						$"attrs={(ushort)property.Attributes:X4}|const={SerializeConstant(property.Constant)}|ca={SerializeCustomAttributes(property.CustomAttributes)}");
+						$"attrs={(ushort)property.Attributes:X4}|const={SerializeConstant(property.Constant)}|" +
+						$"get={SerializeMethods(property.GetMethods)}|set={SerializeMethods(property.SetMethods)}|" +
+						$"other={SerializeMethods(property.OtherMethods)}|ca={SerializeCustomAttributes(property.CustomAttributes)}");
 				}
 				foreach (var @event in type.Events) {
 					string target = @event.FullName;
 					Add("event|" + target, "Event", target,
-						$"attrs={(ushort)@event.Attributes:X4}|type={@event.EventType?.FullName ?? string.Empty}|ca={SerializeCustomAttributes(@event.CustomAttributes)}");
+						$"attrs={(ushort)@event.Attributes:X4}|type={@event.EventType?.FullName ?? string.Empty}|" +
+						$"add={SerializeMethod(@event.AddMethod)}|invoke={SerializeMethod(@event.InvokeMethod)}|" +
+						$"remove={SerializeMethod(@event.RemoveMethod)}|other={SerializeMethods(@event.OtherMethods)}|" +
+						$"ca={SerializeCustomAttributes(@event.CustomAttributes)}");
 				}
 				foreach (var method in type.Methods) {
 					string target = ILPatchMethodIdentity.Create(method).ToCanonicalString();
@@ -169,6 +174,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 				return "file:" + (linked.FileName?.String ?? string.Empty) + "|hash=" + Hex(linked.Hash);
 			return resource.ToString() ?? string.Empty;
 		}
+
+		static string SerializeMethod(MethodDef? method) =>
+			method is null ? string.Empty : ILPatchMethodIdentity.Create(method).ToCanonicalString();
+
+		static string SerializeMethods(IEnumerable<MethodDef> methods) =>
+			string.Join(",", methods.Select(SerializeMethod).OrderBy(a => a, StringComparer.Ordinal));
+
 
 		static string SerializeParams(IList<ParamDef> parameters) =>
 			string.Join(";", parameters
