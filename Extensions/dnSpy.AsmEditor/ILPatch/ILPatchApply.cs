@@ -92,12 +92,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 		sealed class StructuralContext {
 			readonly IDocumentTreeView documentTreeView;
 			readonly Dictionary<TypeDef, TypeNode> typeNodes = new Dictionary<TypeDef, TypeNode>();
+			readonly Dictionary<TypeDef, TypeNode> addedTypeNodes = new Dictionary<TypeDef, TypeNode>();
+			readonly Dictionary<TypeDef, NamespaceNodeCreator> addedTopLevelNamespaces = new Dictionary<TypeDef, NamespaceNodeCreator>();
 			readonly Dictionary<FieldDef, FieldNode> addedFieldNodes = new Dictionary<FieldDef, FieldNode>();
 			readonly Dictionary<MethodDef, MethodNode> addedMethodNodes = new Dictionary<MethodDef, MethodNode>();
 			readonly Dictionary<PropertyDef, PropertyNode> addedPropertyNodes = new Dictionary<PropertyDef, PropertyNode>();
 			readonly Dictionary<EventDef, EventNode> addedEventNodes = new Dictionary<EventDef, EventNode>();
 			readonly HashSet<MethodDef> addedAccessorMethods = new HashSet<MethodDef>();
 			readonly HashSet<MethodDef> removedAccessorMethods = new HashSet<MethodDef>();
+			DeletableNodes<TypeNode> removedTypeNodes;
 			DeletableNodes<FieldNode> removedFieldNodes;
 			DeletableNodes<MethodNode> removedMethodNodes;
 			DeletableNodes<PropertyNode> removedPropertyNodes;
@@ -144,6 +147,27 @@ namespace dnSpy.AsmEditor.ILPatch {
 					throw new NotSupportedException(
 						"GUI structural replay currently requires every accessor of a removed property/event to be removed in the same patch.");
 
+
+				var moduleNode = documentTreeView.FindNode(plan.Module) ??
+					throw new InvalidOperationException($"Could not find the dnSpy module node for '{plan.Module.Name}'.");
+				foreach (var item in plan.AddedTypes.OrderBy(a => TypeDepth(a.Type))) {
+					TypeNode typeNode;
+					if (item.Parent is null) {
+						var nsCreator = new NamespaceNodeCreator(item.Type.Namespace?.String ?? string.Empty, moduleNode);
+						addedTopLevelNamespaces.Add(item.Type, nsCreator);
+						typeNode = moduleNode.Context.DocumentTreeView.Create(item.Type);
+					}
+					else {
+						var parentNode = addedTypeNodes.TryGetValue(item.Parent, out var pendingParent)
+							? pendingParent
+							: documentTreeView.FindNode(item.Parent) as TypeNode ??
+								throw new InvalidOperationException($"Could not find parent type node '{item.Parent.FullName}'.");
+						typeNode = parentNode.Create(item.Type);
+					}
+					addedTypeNodes.Add(item.Type, typeNode);
+					typeNodes[item.Type] = typeNode;
+				}
+
 				foreach (var type in plan.AddedFields.Select(a => a.Type)
 					.Concat(plan.AddedMethodEntries.Select(a => a.Type))
 					.Concat(plan.AddedProperties.Select(a => a.Type))
@@ -153,12 +177,19 @@ namespace dnSpy.AsmEditor.ILPatch {
 					.Concat(plan.RemovedProperties.Select(a => a.Type))
 					.Concat(plan.RemovedEvents.Select(a => a.Type))
 					.Distinct()) {
+					if (typeNodes.ContainsKey(type))
+						continue;
 					var typeNode = documentTreeView.FindNode(type) as TypeNode ??
 						throw new InvalidOperationException($"Could not find the dnSpy type node for '{type.FullName}'.");
 					typeNode.TreeNode.EnsureChildrenLoaded();
 					typeNodes.Add(type, typeNode);
 				}
 
+				var removedTypes = plan.RemovedTypes
+					.Select(x => documentTreeView.FindNode(x.Type) as TypeNode ??
+						throw new InvalidOperationException($"Could not find the dnSpy type node for '{x.Type.FullName}'."))
+					.ToArray();
+				removedTypeNodes = new DeletableNodes<TypeNode>(removedTypes);
 				var removedFields = plan.RemovedFields.Select(a =>
 					documentTreeView.FindNode(a.Field) as FieldNode ??
 					throw new InvalidOperationException($"Could not find the dnSpy field node for '{a.Field.FullName}'.")).ToArray();
@@ -180,6 +211,21 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			public void ExecuteAdditions() {
 				Plan.AttachAdditions();
+
+				foreach (var item in Plan.AddedTypes.OrderBy(a => TypeDepth(a.Type))) {
+					var node = addedTypeNodes[item.Type];
+					if (item.Parent is null) {
+						var nsCreator = addedTopLevelNamespaces[item.Type];
+						nsCreator.Add();
+						nsCreator.NamespaceNode.TreeNode.EnsureChildrenLoaded();
+						nsCreator.NamespaceNode.TreeNode.AddChild(node.TreeNode);
+					}
+					else {
+						var parentNode = typeNodes[item.Parent];
+						parentNode.TreeNode.EnsureChildrenLoaded();
+						parentNode.TreeNode.AddChild(node.TreeNode);
+					}
+				}
 
 				if (!addedNodesCreated) {
 					foreach (var item in Plan.AddedFields)
@@ -212,11 +258,13 @@ namespace dnSpy.AsmEditor.ILPatch {
 				removedEventNodes.Delete();
 				removedMethodNodes.Delete();
 				removedFieldNodes.Delete();
+				removedTypeNodes.Delete();
 				Plan.CommitRemovals();
 			}
 
 			public void UndoRemovals() {
 				Plan.RestoreRemovals();
+				removedTypeNodes.Restore();
 				removedFieldNodes.Restore();
 				removedMethodNodes.Restore();
 				removedEventNodes.Restore();
@@ -241,10 +289,29 @@ namespace dnSpy.AsmEditor.ILPatch {
 					var item = Plan.AddedFields[i];
 					typeNodes[item.Type].TreeNode.Children.Remove(addedFieldNodes[item.Field].TreeNode);
 				}
+				foreach (var item in Plan.AddedTypes.OrderByDescending(a => TypeDepth(a.Type))) {
+					var node = addedTypeNodes[item.Type];
+					if (item.Parent is null) {
+						var nsCreator = addedTopLevelNamespaces[item.Type];
+						nsCreator.NamespaceNode.TreeNode.Children.Remove(node.TreeNode);
+						nsCreator.Remove();
+					}
+					else {
+						typeNodes[item.Parent].TreeNode.Children.Remove(node.TreeNode);
+					}
+				}
 				Plan.RollbackAdditions();
 			}
 
-			public IEnumerable<object> ModifiedObjects => typeNodes.Values.Cast<object>();
+			static int TypeDepth(TypeDef type) {
+				int depth = 0;
+				for (var current = type.DeclaringType2; current is not null; current = current.DeclaringType2)
+					depth++;
+				return depth;
+			}
+
+			public IEnumerable<object> ModifiedObjects =>
+				typeNodes.Values.Cast<object>().Concat(removedTypeNodes.Nodes.Cast<object>());
 		}
 
 		readonly IMethodAnnotations methodAnnotations;

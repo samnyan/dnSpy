@@ -41,6 +41,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 				addedFields.Count + addedMethods.Count + addedProperties.Count + addedEvents.Count +
 				removedFields.Count + removedMethods.Count + removedProperties.Count + removedEvents.Count;
 
+			public ModuleDef Module => module;
 			public IReadOnlyList<(TypeDef? Parent, TypeDef Type)> AddedTypes => addedTypes;
 			public IReadOnlyList<(TypeDef? Parent, TypeDef Type, int Index)> RemovedTypes => removedTypes;
 			public IReadOnlyList<(TypeDef Type, FieldDef Field)> AddedFields => addedFields;
