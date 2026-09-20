@@ -161,6 +161,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 		readonly ComboBox candidateSelector;
 		readonly Button useCandidateButton;
 		readonly Button clearCandidateButton;
+		readonly Button compareCandidateButton;
 		readonly Button manualMergeButton;
 		readonly Button revertButton;
 		readonly Button compareChangeButton;
@@ -445,6 +446,16 @@ namespace dnSpy.AsmEditor.ILPatch {
 			};
 			clearCandidateButton.Click += ClearCandidateButton_Click;
 			candidateButtons.Children.Add(clearCandidateButton);
+
+			compareCandidateButton = new Button {
+				Content = "Compare Candidate...",
+				Padding = new Thickness(8, 2, 8, 2),
+				Margin = new Thickness(8, 0, 0, 0),
+				IsEnabled = false,
+				ToolTip = "Compare the old patch baseline against the selected new-build candidate. This is advisory and works even when the candidate signature changed.",
+			};
+			compareCandidateButton.Click += CompareCandidateButton_Click;
+			candidateButtons.Children.Add(compareCandidateButton);
 
 			manualMergeButton = new Button {
 				Content = "Manual Merge...",
@@ -839,6 +850,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			candidateSelector.IsEnabled = false;
 			useCandidateButton.IsEnabled = false;
 			clearCandidateButton.IsEnabled = false;
+			compareCandidateButton.IsEnabled = false;
 			manualMergeButton.IsEnabled = false;
 			compareImportButton.IsEnabled = false;
 			clearImportButton.IsEnabled = false;
@@ -1100,6 +1112,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			candidateSelector.IsEnabled = false;
 			useCandidateButton.IsEnabled = false;
 			clearCandidateButton.IsEnabled = false;
+			compareCandidateButton.IsEnabled = false;
 			manualMergeButton.IsEnabled = false;
 			if (row is null)
 				return;
@@ -1127,7 +1140,27 @@ namespace dnSpy.AsmEditor.ILPatch {
 			var row = importGrid.SelectedItem as ImportRow;
 			var choice = candidateSelector.SelectedItem as CandidateChoice;
 			useCandidateButton.IsEnabled = row is not null && choice?.IsCompatible == true;
+			compareCandidateButton.IsEnabled = row is not null && choice?.Candidate.Method is not null;
 			manualMergeButton.IsEnabled = row is not null && (choice?.Candidate.Method is not null || row.Result.Target is not null);
+		}
+
+		void CompareCandidateButton_Click(object sender, RoutedEventArgs e) {
+			var row = importGrid.SelectedItem as ImportRow;
+			var choice = candidateSelector.SelectedItem as CandidateChoice;
+			var candidate = choice?.Candidate.Method;
+			if (row is null || candidate is null || candidate.Body is null)
+				return;
+
+			var current = CilNormalizer.CreateSnapshot(candidate);
+			current.CanonicalHash = ILPatchBodyHasher.Compute(current);
+			var comparison = new ILPatchMethodChange {
+				Id = row.Result.Patch.Id,
+				Target = choice!.Candidate.Identity,
+				BaseModuleMvid = candidate.Module?.Mvid ?? Guid.Empty,
+				BaseBody = row.Result.Patch.BaseBody,
+				PatchedBody = current,
+			};
+			ShowDiffWindow(comparison, candidate);
 		}
 
 		void ManualMergeButton_Click(object sender, RoutedEventArgs e) {
