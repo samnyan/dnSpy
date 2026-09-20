@@ -25,28 +25,45 @@ namespace dnSpy.AsmEditor.ILPatch {
 		internal sealed class Plan {
 			readonly List<(TypeDef Type, FieldDef Field)> addedFields;
 			readonly List<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> addedMethods;
+			readonly List<(TypeDef Type, PropertyDef Property)> addedProperties;
+			readonly List<(TypeDef Type, EventDef Event)> addedEvents;
 			readonly List<(TypeDef Type, FieldDef Field, int Index)> removedFields;
 			readonly List<(TypeDef Type, MethodDef Method, int Index)> removedMethods;
+			readonly List<(TypeDef Type, PropertyDef Property, int Index)> removedProperties;
+			readonly List<(TypeDef Type, EventDef Event, int Index)> removedEvents;
 			bool additionsAttached;
 
 			public int OperationCount =>
-				addedFields.Count + addedMethods.Count + removedFields.Count + removedMethods.Count;
+				addedFields.Count + addedMethods.Count + addedProperties.Count + addedEvents.Count +
+				removedFields.Count + removedMethods.Count + removedProperties.Count + removedEvents.Count;
 
 			public IReadOnlyList<(TypeDef Type, FieldDef Field)> AddedFields => addedFields;
 			public IReadOnlyList<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> AddedMethodEntries => addedMethods;
+			public IReadOnlyList<(TypeDef Type, PropertyDef Property)> AddedProperties => addedProperties;
+			public IReadOnlyList<(TypeDef Type, EventDef Event)> AddedEvents => addedEvents;
 			public IReadOnlyList<(TypeDef Type, FieldDef Field, int Index)> RemovedFields => removedFields;
 			public IReadOnlyList<(TypeDef Type, MethodDef Method, int Index)> RemovedMethods => removedMethods;
+			public IReadOnlyList<(TypeDef Type, PropertyDef Property, int Index)> RemovedProperties => removedProperties;
+			public IReadOnlyList<(TypeDef Type, EventDef Event, int Index)> RemovedEvents => removedEvents;
 			public IReadOnlyList<(MethodDef Method, ILPatchMethodBodySnapshot? Body)> AddedMethods =>
 				addedMethods.Select(a => (a.Method, a.Body)).ToArray();
 
 			internal Plan(List<(TypeDef Type, FieldDef Field)> addedFields,
 				List<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> addedMethods,
+				List<(TypeDef Type, PropertyDef Property)> addedProperties,
+				List<(TypeDef Type, EventDef Event)> addedEvents,
 				List<(TypeDef Type, FieldDef Field, int Index)> removedFields,
-				List<(TypeDef Type, MethodDef Method, int Index)> removedMethods) {
+				List<(TypeDef Type, MethodDef Method, int Index)> removedMethods,
+				List<(TypeDef Type, PropertyDef Property, int Index)> removedProperties,
+				List<(TypeDef Type, EventDef Event, int Index)> removedEvents) {
 				this.addedFields = addedFields;
 				this.addedMethods = addedMethods;
+				this.addedProperties = addedProperties;
+				this.addedEvents = addedEvents;
 				this.removedFields = removedFields;
 				this.removedMethods = removedMethods;
+				this.removedProperties = removedProperties;
+				this.removedEvents = removedEvents;
 			}
 
 			public void AttachAdditions() {
@@ -56,12 +73,20 @@ namespace dnSpy.AsmEditor.ILPatch {
 					item.Type.Fields.Add(item.Field);
 				foreach (var item in addedMethods)
 					item.Type.Methods.Add(item.Method);
+				foreach (var item in addedProperties)
+					item.Type.Properties.Add(item.Property);
+				foreach (var item in addedEvents)
+					item.Type.Events.Add(item.Event);
 				additionsAttached = true;
 			}
 
 			public void RollbackAdditions() {
 				if (!additionsAttached)
 					return;
+				for (int i = addedEvents.Count - 1; i >= 0; i--)
+					addedEvents[i].Type.Events.Remove(addedEvents[i].Event);
+				for (int i = addedProperties.Count - 1; i >= 0; i--)
+					addedProperties[i].Type.Properties.Remove(addedProperties[i].Property);
 				for (int i = addedMethods.Count - 1; i >= 0; i--)
 					addedMethods[i].Type.Methods.Remove(addedMethods[i].Method);
 				for (int i = addedFields.Count - 1; i >= 0; i--)
@@ -70,6 +95,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 			}
 
 			public void CommitRemovals() {
+				foreach (var item in removedProperties)
+					item.Type.Properties.Remove(item.Property);
+				foreach (var item in removedEvents)
+					item.Type.Events.Remove(item.Event);
 				foreach (var item in removedMethods)
 					item.Type.Methods.Remove(item.Method);
 				foreach (var item in removedFields)
@@ -81,6 +110,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 					item.Type.Fields.Insert(item.Index, item.Field);
 				foreach (var item in removedMethods.OrderBy(a => a.Index))
 					item.Type.Methods.Insert(item.Index, item.Method);
+				foreach (var item in removedProperties.OrderBy(a => a.Index))
+					item.Type.Properties.Insert(item.Index, item.Property);
+				foreach (var item in removedEvents.OrderBy(a => a.Index))
+					item.Type.Events.Insert(item.Index, item.Event);
 			}
 		}
 
@@ -95,8 +128,12 @@ namespace dnSpy.AsmEditor.ILPatch {
 			error = string.Empty;
 			var addedFields = new List<(TypeDef, FieldDef)>();
 			var addedMethods = new List<(TypeDef, MethodDef, ILPatchMethodBodySnapshot?)>();
+			var addedProperties = new List<(TypeDef, PropertyDef)>();
+			var addedEvents = new List<(TypeDef, EventDef)>();
 			var removedFields = new List<(TypeDef, FieldDef, int)>();
 			var removedMethods = new List<(TypeDef, MethodDef, int)>();
+			var removedProperties = new List<(TypeDef, PropertyDef, int)>();
+			var removedEvents = new List<(TypeDef, EventDef, int)>();
 			var resolver = new TypeSigResolver(module);
 
 			foreach (var change in changes) {
@@ -131,6 +168,32 @@ namespace dnSpy.AsmEditor.ILPatch {
 						return false;
 					}
 					removedMethods.Add((type, candidates[0], type.Methods.IndexOf(candidates[0])));
+				}
+
+				foreach (var removed in change.RemovedProperties) {
+					var candidates = type!.Properties.Where(a =>
+						StringComparer.Ordinal.Equals(ILPatchPropertyIdentity.Create(a).ToCanonicalString(),
+							removed.ToCanonicalString())).ToArray();
+					if (candidates.Length != 1) {
+						error = candidates.Length == 0
+							? $"Property to remove '{removed}' was not found."
+							: $"Property to remove '{removed}' is ambiguous ({candidates.Length} matches).";
+						return false;
+					}
+					removedProperties.Add((type, candidates[0], type.Properties.IndexOf(candidates[0])));
+				}
+
+				foreach (var removed in change.RemovedEvents) {
+					var candidates = type!.Events.Where(a =>
+						StringComparer.Ordinal.Equals(ILPatchEventIdentity.Create(a).ToCanonicalString(),
+							removed.ToCanonicalString())).ToArray();
+					if (candidates.Length != 1) {
+						error = candidates.Length == 0
+							? $"Event to remove '{removed}' was not found."
+							: $"Event to remove '{removed}' is ambiguous ({candidates.Length} matches).";
+						return false;
+					}
+					removedEvents.Add((type, candidates[0], type.Events.IndexOf(candidates[0])));
 				}
 
 				foreach (var added in change.AddedFields) {
@@ -172,10 +235,125 @@ namespace dnSpy.AsmEditor.ILPatch {
 						method.Body = new CilBody();
 					addedMethods.Add((type, method, added.Body));
 				}
+
+				foreach (var added in change.AddedProperties) {
+					if (added?.Identity is null || added.Signature is null) {
+						error = $"Type '{change.Target}' contains an incomplete added-property definition.";
+						return false;
+					}
+					if (type!.Properties.Any(a => StringComparer.Ordinal.Equals(
+						ILPatchPropertyIdentity.Create(a).ToCanonicalString(), added.Identity.ToCanonicalString()))) {
+						error = $"Property to add '{added.Identity}' already exists.";
+						return false;
+					}
+					if (!resolver.TryCreate(added.Signature, out var propertySig, out error))
+						return false;
+					var property = new PropertyDefUser(added.Identity.Name, propertySig!, (PropertyAttributes)added.Attributes);
+					foreach (var accessor in added.GetMethods) {
+						if (!TryResolveMethod(type, accessor, addedMethods, out var method, out error))
+							return false;
+						property.GetMethods.Add(method!);
+					}
+					foreach (var accessor in added.SetMethods) {
+						if (!TryResolveMethod(type, accessor, addedMethods, out var method, out error))
+							return false;
+						property.SetMethods.Add(method!);
+					}
+					foreach (var accessor in added.OtherMethods) {
+						if (!TryResolveMethod(type, accessor, addedMethods, out var method, out error))
+							return false;
+						property.OtherMethods.Add(method!);
+					}
+					addedProperties.Add((type, property));
+				}
+
+				foreach (var added in change.AddedEvents) {
+					if (added?.Identity is null || added.EventType is null) {
+						error = $"Type '{change.Target}' contains an incomplete added-event definition.";
+						return false;
+					}
+					if (type!.Events.Any(a => StringComparer.Ordinal.Equals(
+						ILPatchEventIdentity.Create(a).ToCanonicalString(), added.Identity.ToCanonicalString()))) {
+						error = $"Event to add '{added.Identity}' already exists.";
+						return false;
+					}
+					if (!resolver.TryCreate(added.EventType, out var eventTypeSig, out error))
+						return false;
+					ITypeDefOrRef eventType = eventTypeSig is TypeDefOrRefSig typeDefOrRefSig
+						? typeDefOrRefSig.TypeDefOrRef
+						: new TypeSpecUser(eventTypeSig!);
+					var @event = new EventDefUser(added.Identity.Name, eventType, (EventAttributes)added.Attributes);
+					if (added.AddMethod is not null) {
+						if (!TryResolveMethod(type, added.AddMethod, addedMethods, out var method, out error))
+							return false;
+						@event.AddMethod = method;
+					}
+					if (added.InvokeMethod is not null) {
+						if (!TryResolveMethod(type, added.InvokeMethod, addedMethods, out var method, out error))
+							return false;
+						@event.InvokeMethod = method;
+					}
+					if (added.RemoveMethod is not null) {
+						if (!TryResolveMethod(type, added.RemoveMethod, addedMethods, out var method, out error))
+							return false;
+						@event.RemoveMethod = method;
+					}
+					foreach (var accessor in added.OtherMethods) {
+						if (!TryResolveMethod(type, accessor, addedMethods, out var method, out error))
+							return false;
+						@event.OtherMethods.Add(method!);
+					}
+					addedEvents.Add((type, @event));
+				}
 			}
 
 
-			plan = new Plan(addedFields, addedMethods, removedFields, removedMethods);
+			plan = new Plan(addedFields, addedMethods, addedProperties, addedEvents,
+				removedFields, removedMethods, removedProperties, removedEvents);
+			return true;
+		}
+
+
+		static bool TryResolveMethod(TypeDef type, ILPatchMethodIdentity identity,
+			IReadOnlyList<(TypeDef Type, MethodDef Method, ILPatchMethodBodySnapshot? Body)> pendingMethods,
+			out MethodDef? method, out string error) {
+			method = null;
+			error = string.Empty;
+			var candidates = type.Methods
+				.Concat(pendingMethods.Where(a => ReferenceEquals(a.Type, type)).Select(a => a.Method))
+				.Where(a => MethodMatches(type, a, identity))
+				.Distinct()
+				.ToArray();
+			if (candidates.Length != 1) {
+				error = candidates.Length == 0
+					? $"Accessor method '{identity}' was not found while materializing structural metadata."
+					: $"Accessor method '{identity}' is ambiguous ({candidates.Length} matches).";
+				return false;
+			}
+			method = candidates[0];
+			return true;
+		}
+
+		static bool MethodMatches(TypeDef declaringType, MethodDef method, ILPatchMethodIdentity identity) {
+			if (!StringComparer.Ordinal.Equals(declaringType.FullName ?? string.Empty, identity.DeclaringType) ||
+				!StringComparer.Ordinal.Equals(method.Name?.String ?? string.Empty, identity.MethodName) ||
+				!StringComparer.Ordinal.Equals(method.ReturnType?.FullName ?? string.Empty, identity.ReturnType) ||
+				method.GenericParameters.Count != identity.GenericArity ||
+				(method.MethodSig?.HasThis == true) != identity.HasThis)
+				return false;
+			if (!string.IsNullOrEmpty(identity.ModuleName) &&
+				!StringComparer.Ordinal.Equals(declaringType.Module?.Name?.String ?? string.Empty, identity.ModuleName))
+				return false;
+			if (!string.IsNullOrEmpty(identity.AssemblyName) &&
+				!StringComparer.Ordinal.Equals(declaringType.Module?.Assembly?.Name?.String ?? string.Empty, identity.AssemblyName))
+				return false;
+			var parameters = method.MethodSig?.Params ?? Array.Empty<TypeSig>();
+			if (parameters.Count != identity.ParameterTypes.Count)
+				return false;
+			for (int i = 0; i < parameters.Count; i++) {
+				if (!StringComparer.Ordinal.Equals(parameters[i].FullName ?? string.Empty, identity.ParameterTypes[i]))
+					return false;
+			}
 			return true;
 		}
 
@@ -251,6 +429,25 @@ namespace dnSpy.AsmEditor.ILPatch {
 				if (type is null || string.IsNullOrEmpty(type.FullName) || named.ContainsKey(type.FullName))
 					return;
 				named.Add(type.FullName, type);
+			}
+
+			public bool TryCreate(ILPatchPropertySignatureSnapshot snapshot, out PropertySig? signature, out string error) {
+				signature = null;
+				error = string.Empty;
+				if (snapshot is null || snapshot.ReturnType is null) {
+					error = "Property signature snapshot is incomplete.";
+					return false;
+				}
+				if (!TryCreate(snapshot.ReturnType, out var returnType, out error))
+					return false;
+				var parameters = new TypeSig[snapshot.Parameters.Count];
+				for (int i = 0; i < parameters.Length; i++) {
+					if (!TryCreate(snapshot.Parameters[i], out var parameter, out error))
+						return false;
+					parameters[i] = parameter!;
+				}
+				signature = new PropertySig(snapshot.HasThis, returnType!, parameters);
+				return true;
 			}
 
 			public bool TryCreate(ILPatchMethodSignatureSnapshot snapshot, out MethodSig? signature, out string error) {
