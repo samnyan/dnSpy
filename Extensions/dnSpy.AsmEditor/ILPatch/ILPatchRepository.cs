@@ -38,6 +38,10 @@ namespace dnSpy.AsmEditor.ILPatch {
 		RemovedField,
 		AddedMethod,
 		RemovedMethod,
+		AddedProperty,
+		RemovedProperty,
+		AddedEvent,
+		RemovedEvent,
 	}
 
 	sealed class ILPatchRepositoryStructuralSummary {
@@ -456,6 +460,30 @@ namespace dnSpy.AsmEditor.ILPatch {
 						Kind = ILPatchRepositoryStructuralChangeKind.RemovedMethod,
 						DeclaringType = typeChange.Target,
 						Member = method.ToString(),
+					});
+				foreach (var property in typeChange.AddedProperties)
+					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
+						Kind = ILPatchRepositoryStructuralChangeKind.AddedProperty,
+						DeclaringType = typeChange.Target,
+						Member = property.Identity.ToString(),
+					});
+				foreach (var property in typeChange.RemovedProperties)
+					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
+						Kind = ILPatchRepositoryStructuralChangeKind.RemovedProperty,
+						DeclaringType = typeChange.Target,
+						Member = property.ToString(),
+					});
+				foreach (var @event in typeChange.AddedEvents)
+					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
+						Kind = ILPatchRepositoryStructuralChangeKind.AddedEvent,
+						DeclaringType = typeChange.Target,
+						Member = @event.Identity.ToString(),
+					});
+				foreach (var @event in typeChange.RemovedEvents)
+					commit.StructuralChanges.Add(new ILPatchRepositoryStructuralSummary {
+						Kind = ILPatchRepositoryStructuralChangeKind.RemovedEvent,
+						DeclaringType = typeChange.Target,
+						Member = @event.ToString(),
 					});
 			}
 		}

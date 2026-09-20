@@ -528,7 +528,9 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 		static string DescribeStructuralChange(ILPatchTypeChange change) =>
 			$"+{change.AddedFields.Count} field / -{change.RemovedFields.Count} field / " +
-			$"+{change.AddedMethods.Count} method / -{change.RemovedMethods.Count} method";
+			$"+{change.AddedMethods.Count} method / -{change.RemovedMethods.Count} method / " +
+			$"+{change.AddedProperties.Count} property / -{change.RemovedProperties.Count} property / " +
+			$"+{change.AddedEvents.Count} event / -{change.RemovedEvents.Count} event";
 
 		void WorkingChangesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
 			compareWorkingChangeButton.IsEnabled =
