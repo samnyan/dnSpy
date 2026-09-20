@@ -907,7 +907,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 			getter.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
 			type.Methods.Add(getter);
 			var property = new PropertyDefUser("Value",
-				PropertySig.CreateStatic(modified.Module.CorLibTypes.Int32), PropertyAttributes.None);
+				PropertySig.CreateStatic(modified.Module.CorLibTypes.Int32), (PropertyAttributes)0);
 			property.GetMethods.Add(getter);
 			type.Properties.Add(property);
 
@@ -948,7 +948,7 @@ namespace dnSpy.AsmEditor.ILPatch {
 
 			var add = CreateAccessor("add_Changed");
 			var remove = CreateAccessor("remove_Changed");
-			var @event = new EventDefUser("Changed", modified.Module.CorLibTypes.Object.TypeDefOrRef, EventAttributes.None) {
+			var @event = new EventDefUser("Changed", modified.Module.CorLibTypes.Object.TypeDefOrRef, (EventAttributes)0) {
 				AddMethod = add,
 				RemoveMethod = remove,
 			};

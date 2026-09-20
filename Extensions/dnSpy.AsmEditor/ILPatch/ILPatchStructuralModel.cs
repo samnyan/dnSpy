@@ -64,14 +64,15 @@ namespace dnSpy.AsmEditor.ILPatch {
 		public static ILPatchPropertyIdentity Create(PropertyDef property) {
 			if (property is null)
 				throw new ArgumentNullException(nameof(property));
+			var signature = property.PropertySig;
 			var result = new ILPatchPropertyIdentity {
 				DeclaringType = ILPatchTypeIdentity.Create(property.DeclaringType),
 				Name = property.Name?.String ?? string.Empty,
-				HasThis = property.Type?.HasThis == true,
-				ReturnType = property.Type?.RetType?.FullName ?? string.Empty,
+				HasThis = signature?.HasThis == true,
+				ReturnType = signature?.RetType?.FullName ?? string.Empty,
 			};
-			if (property.Type is not null)
-				result.Parameters.AddRange(property.Type.Params.Select(a => a.FullName ?? string.Empty));
+			if (signature is not null)
+				result.Parameters.AddRange(signature.Params.Select(a => a.FullName ?? string.Empty));
 			return result;
 		}
 
@@ -245,21 +246,22 @@ namespace dnSpy.AsmEditor.ILPatch {
 				error = $"Property '{property.FullName}' uses custom attributes or a constant that structural patch v2 does not capture yet.";
 				return false;
 			}
-			if (property.Type is null || property.Type.RetType is null) {
-				error = $"Property '{property.FullName}' has no usable signature.";
+			var propertySig = property.PropertySig;
+			if (propertySig is null || propertySig.RetType is null) {
+				error = $"Property '{property.FullName}' has no usable PropertySig.";
 				return false;
 			}
-			if (property.Type.ExplicitThis) {
+			if (propertySig.ExplicitThis) {
 				error = $"Property '{property.FullName}' uses ExplicitThis, which structural patch v2 does not capture yet.";
 				return false;
 			}
-			if (!TryCreateTypeSig(property.Type.RetType, out var returnType, out error))
+			if (!TryCreateTypeSig(propertySig.RetType, out var returnType, out error))
 				return false;
 			var signature = new ILPatchPropertySignatureSnapshot {
-				HasThis = property.Type.HasThis,
+				HasThis = propertySig.HasThis,
 				ReturnType = returnType!,
 			};
-			foreach (var parameter in property.Type.Params) {
+			foreach (var parameter in propertySig.Params) {
 				if (!TryCreateTypeSig(parameter, out var parameterType, out error))
 					return false;
 				signature.Parameters.Add(parameterType!);
